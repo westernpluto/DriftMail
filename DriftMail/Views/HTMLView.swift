@@ -64,7 +64,12 @@ struct HTMLView: UIViewRepresentable {
         var available = document.documentElement.clientWidth - 28;
         var needed = root.scrollWidth;
         if (needed > available && available > 0) { root.style.zoom = available / needed; }
-        window.webkit.messageHandlers.size.postMessage(document.documentElement.scrollHeight);
+        // Measure the content, not the document: documentElement.scrollHeight is never
+        // less than the web view's current height, so it could only ever grow and a
+        // short email shown after a long one (or after unfolding) kept a blank area.
+        var body = document.body;
+        var height = Math.max(body.scrollHeight, Math.ceil(body.getBoundingClientRect().height));
+        window.webkit.messageHandlers.size.postMessage(height);
       }
       window.addEventListener('load', fit);
       window.addEventListener('resize', fit);
