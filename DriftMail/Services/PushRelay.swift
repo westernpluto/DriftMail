@@ -50,6 +50,8 @@ final class PushRelay {
     }
 
     var isSyncing = false
+    var isSettingUp = false
+    var setupProgress: String?
     var lastMessage: String?
     var lastSyncSucceeded: Bool?
     var status: Status?
@@ -97,6 +99,62 @@ final class PushRelay {
 
     func regenerateTopic() {
         ntfyTopic = "driftmail-" + Self.randomString(22).lowercased()
+    }
+
+    // MARK: Automatic setup
+
+    /// True when the app deployed the relay itself and can keep it updated.
+    var isManagedByApp: Bool { Keychain.get("relay.cloudflareToken") != nil }
+
+    /// Deploys the relay to the person's Cloudflare account, pairs this phone,
+    /// uploads the accounts and sends a test notification. One tap.
+    func setUpAutomatically(cloudflareToken: String) async {
+        let token = cloudflareToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        isSettingUp = true
+        lastMessage = nil
+        lastSyncSucceeded = nil
+        defer { isSettingUp = false; setupProgress = nil }
+        do {
+            let code = pairingCode.count >= 16 ? pairingCode : Self.randomString(32)
+            let result = try await CloudflareSetup.deploy(token: token, pairingCode: code, encryptionKey: encryptionKey) { step in
+                self.setupProgress = step
+            }
+            Keychain.set(token, for: "relay.cloudflareToken")
+            pairingCode = result.pairingCode
+            workerURL = result.url
+            UserDefaults.standard.set(CloudflareSetup.bundledScriptHash, forKey: "relay.deployedHash")
+            setupProgress = "Connecting your accounts…"
+            await sync()
+            if lastSyncSucceeded == true {
+                await sendTest()
+                lastMessage = "All set. Your relay is live and a test notification is on its way."
+            }
+        } catch {
+            lastSyncSucceeded = false
+            lastMessage = error.localizedDescription
+        }
+    }
+
+    /// When a new DriftMail version ships updated relay code, redeploy it quietly.
+    func updateRelayIfNeeded() async {
+        guard !isSettingUp, let token = Keychain.get("relay.cloudflareToken"), isConfigured,
+              let hash = CloudflareSetup.bundledScriptHash,
+              UserDefaults.standard.string(forKey: "relay.deployedHash") != hash else { return }
+        do {
+            _ = try await CloudflareSetup.deploy(token: token, pairingCode: pairingCode, encryptionKey: encryptionKey) { _ in }
+            UserDefaults.standard.set(hash, forKey: "relay.deployedHash")
+        } catch {
+            // Try again next launch.
+        }
+    }
+
+    /// Stable key the relay uses to encrypt stored app passwords.
+    private var encryptionKey: String {
+        if let existing = Keychain.get("relay.encKey") { return existing }
+        let fresh = Self.randomString(44)
+        Keychain.set(fresh, for: "relay.encKey")
+        return fresh
     }
 
     // MARK: API
@@ -202,6 +260,7 @@ final class PushRelay {
 
     func disconnect() async {
         _ = try? await request("/v1/sync", method: "DELETE")
+        Keychain.delete("relay.cloudflareToken")
         status = nil
         lastSyncSucceeded = nil
         lastMessage = "Disconnected. Your Worker no longer stores your accounts."

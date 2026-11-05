@@ -19,6 +19,9 @@ struct MailSplitView: View {
     @Environment(MailStore.self) private var store
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
     @State private var showSettings = false
+    @State private var showNotificationSetup = false
+    @AppStorage("didOfferNotificationSetup") private var didOfferNotificationSetup = false
+    @Environment(PushRelay.self) private var relay
 
     var body: some View {
         @Bindable var store = store
@@ -41,6 +44,25 @@ struct MailSplitView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showNotificationSetup) {
+            NavigationStack {
+                NotificationSetupView()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(role: .cancel) { showNotificationSetup = false } label: {
+                                Label("Not Now", systemImage: "xmark")
+                            }
+                        }
+                    }
+            }
+        }
+        .task {
+            // Offer free instant notifications once, right after the first account is added.
+            guard !didOfferNotificationSetup, !relay.isConfigured else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            didOfferNotificationSetup = true
+            showNotificationSetup = true
         }
         .alert("Something went wrong", isPresented: Binding(
             get: { store.errorMessage != nil },

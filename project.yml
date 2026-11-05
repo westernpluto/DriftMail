@@ -18,6 +18,9 @@ targets:
       - path: DriftMail
         excludes:
           - Info.plist
+      # The relay is bundled so the app can deploy it to Cloudflare by itself.
+      - path: worker/src/index.js
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.driftmail.DriftMail

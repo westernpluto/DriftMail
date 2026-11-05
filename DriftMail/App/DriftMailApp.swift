@@ -23,6 +23,7 @@ struct DriftMailApp: App {
             case .active:
                 store.startLive()
                 Task { await store.refreshAll() }
+                Task { await relay.updateRelayIfNeeded() }
             case .background:
                 store.stopLive()
                 NotificationService.updateBadge(store.unreadCount(.unifiedInbox))

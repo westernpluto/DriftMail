@@ -30,12 +30,19 @@ Details:
 
 ## Install the app
 
-1. GitHub Actions builds an unsigned `.ipa` on every push to `main`/`master`, using the `xcode-27` runner with **Xcode 27.1** (`.github/workflows/build-ipa.yml`). Download it from the run's **Artifacts** (`DriftMail-ipa`), or push a tag such as `v1.0.0` to get it attached to a GitHub Release.
-2. Sideload it with a free tool such as [Sideloadly](https://sideloadly.io) or [AltStore](https://altstore.io) and your Apple ID. With a free Apple ID, the app has to be re-signed every 7 days. AltStore can do this for you automatically.
+Every push to `main` builds the app on GitHub's `xcode-27` runner with **Xcode 27.1** and publishes a numbered [release](../../releases/latest).
 
-The app requires iOS 27.1 or later, the first iOS release with the iPhone Duo APIs.
+**Easiest: AltStore or SideStore (automatic updates).** In [AltStore](https://altstore.io) or [SideStore](https://sidestore.io), add this source once:
 
-To build locally on a Mac with Xcode 27.1, run `brew install xcodegen && xcodegen generate && open DriftMail.xcodeproj`.
+```
+https://github.com/westernpluto/DriftMail/releases/latest/download/altstore-source.json
+```
+
+Then install DriftMail from it. New versions appear as updates, and AltStore/SideStore re-sign the app in the background before the free 7-day signature expires. If you use a fork, swap in your own `owner/repo`.
+
+**Alternative: Sideloadly.** Download `DriftMail.ipa` from the [latest release](../../releases/latest) and install it with [Sideloadly](https://sideloadly.io). With a free Apple ID you have to repeat this every 7 days.
+
+The app requires iOS 27.1 or later, the first release with the iPhone Duo APIs. To build locally on a Mac with Xcode 27.1, run `brew install xcodegen && xcodegen generate && open DriftMail.xcodeproj`.
 
 ## Add your accounts
 
@@ -65,25 +72,32 @@ iOS won't let a free, sideloaded app keep a mail connection open in the backgrou
 - **Native push.** If you sign DriftMail with a **paid** Apple Developer account, the Worker can send through Apple Push directly (see below). Apple doesn't allow push for free Apple IDs, which is why ntfy is the default.
 - **Speed.** The Worker checks every minute, the shortest interval the free plan allows, so a notification arrives at most about a minute after the email does. While DriftMail is open, new mail shows up right away over IMAP IDLE.
 
-### Deploy the relay with one click
+### Set it up from the app (recommended, about 2 minutes)
 
-1. Create a free account at <https://dash.cloudflare.com/sign-up>. Open **Workers & Pages** once so Cloudflare sets up your `*.workers.dev` subdomain.
-2. In Cloudflare, go to **My Profile → API Tokens → Create Token** and choose the **Edit Cloudflare Workers** template. Copy the token. Also copy your **Account ID**, shown on the Workers & Pages overview.
-3. In your GitHub repo (your own fork if you're not the owner of this one), go to **Settings → Secrets and variables → Actions** and add three **repository secrets**:
-   - `CLOUDFLARE_API_TOKEN`
-   - `CLOUDFLARE_ACCOUNT_ID`
-   - `RELAY_PAIRING_CODE`: a code you make up, at least 8 characters. Longer is better, for example four random words.
+Open **Settings → Instant Notifications** in DriftMail:
 
-   Secrets are encrypted and never shown to anyone, even in a public repo. Never put these values in a file.
-4. Go to **Actions → Deploy notification relay → Run workflow**. Logs of public repos are visible to everyone, so the workflow doesn't print your relay address. Copy it from the Cloudflare dashboard under **Workers & Pages → driftmail-relay**, for example `https://driftmail-relay.yourname.workers.dev`.
-5. In DriftMail, open **Settings → Instant Notifications**:
-   - Paste the relay address and your pairing code.
-   - Install **ntfy**, tap **+**, and subscribe to the topic DriftMail shows (use **Copy topic**).
-   - Tap **Connect Accounts to Relay**, then **Send Test Notification**.
+1. **ntfy:** tap **Install ntfy**, then **Copy my topic**. In ntfy, tap **+**, paste the topic and subscribe.
+2. **Cloudflare:** tap **Create a free Cloudflare account** if you don't have one. Then tap **Create a DriftMail token**. It opens Cloudflare with the right permissions already filled in. Tap **Continue to summary → Create Token**, copy the token, and paste it into DriftMail.
+3. Tap **Set Up Notifications**.
 
-**Who can use the relay.** Only a phone that presents the pairing code can pair with the relay. After that, the relay only answers that phone, which proves itself with a random token kept in its Keychain. Someone who finds the relay address can't do anything with it. Entering the pairing code on a new or reinstalled phone moves the relay to that phone.
+DriftMail then does the rest:
+- creates the storage and uploads the relay to your Cloudflare account
+- schedules the once-a-minute check
+- turns on the relay's `workers.dev` address
+- pairs the relay with your phone using a random secret code
+- uploads your accounts and sends a test notification
 
-**One relay per person.** Each relay serves one owner. If friends want DriftMail notifications, they fork the repo and deploy their own relay in their own free Cloudflare account.
+Nothing goes into GitHub, and you never type an address or a pairing code. When a new DriftMail version includes relay changes, the app redeploys the relay automatically.
+
+The token can only manage Workers and KV storage (plus read basic account info). DriftMail keeps it in the iOS Keychain so it can update the relay. You can delete the token in Cloudflare at any time; the relay keeps working, it just won't auto-update.
+
+**One relay per person.** Each relay serves one phone. Friends set up their own relay in their own free Cloudflare account, which takes the same three steps.
+
+### Deploy from GitHub Actions (alternative)
+
+1. In your repo (a fork, if this one isn't yours), go to **Settings → Secrets and variables → Actions** and add three repository secrets: `CLOUDFLARE_API_TOKEN` (made from the **Edit Cloudflare Workers** template), `CLOUDFLARE_ACCOUNT_ID`, and `RELAY_PAIRING_CODE` (a code you make up, at least 8 characters). Secrets stay encrypted and hidden, even in a public repo.
+2. Run **Actions → Deploy notification relay**. Logs of public repos are visible to everyone, so the workflow doesn't print the address. Copy it from the Cloudflare dashboard under **Workers & Pages → driftmail-relay**.
+3. In DriftMail, open **Instant Notifications → Manual setup & advanced**, enter the address and pairing code, and tap **Connect with these settings**.
 
 ### Deploy by hand (alternative)
 
@@ -96,9 +110,11 @@ npx wrangler deploy
 npx wrangler secret put PAIRING_CODE            # the code you'll type into the app
 ```
 
+**Who can use a relay.** A phone can only pair with the relay if it presents the pairing code. After that, the relay only answers that phone. Someone who finds the relay address can't do anything with it.
+
 ### Privacy and security notes
 
-- To check mail for you, the relay stores your app passwords in **your own** Cloudflare KV, encrypted with AES-GCM. For a key you control, add a secret with `npx wrangler secret put ENC_KEY` before you connect. Otherwise the Worker generates a key and stores it in KV.
+- To check mail for you, the relay stores your app passwords in **your own** Cloudflare KV, encrypted with AES-GCM. With in-app setup, the encryption key is a Worker secret that DriftMail generates and keeps in your Keychain. With manual setup, add `ENC_KEY` as a secret yourself (`npx wrangler secret put ENC_KEY`); otherwise the Worker generates a key and stores it in KV.
 - App passwords can be revoked at any time and can't be used to sign in to your account's settings.
 - Turn off **Show sender and subject** if you'd rather not have message details pass through ntfy.sh. You can also self-host ntfy and change the server under **Advanced**. Set an `NTFY_TOKEN` secret if your server requires auth.
 - **Disconnect Relay** in the app deletes your accounts from the Worker.

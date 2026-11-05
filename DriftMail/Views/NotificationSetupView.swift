@@ -1,15 +1,16 @@
 import SwiftUI
 
-/// Guides the person through the free push relay:
-/// a Cloudflare Worker (free plan) checks every inbox each minute and pushes
-/// new-mail notifications through ntfy (free) or Apple Push (paid developer account).
+/// Free instant notifications in three steps:
+/// 1. ntfy app + topic, 2. a Cloudflare token, 3. one tap that deploys the relay
+/// to the person's own Cloudflare account, pairs this phone and sends a test.
 struct NotificationSetupView: View {
     @Environment(PushRelay.self) private var relay
     @Environment(\.openURL) private var openURL
+    @State private var cloudflareToken = ""
     @State private var copied = false
+    @State private var showManual = false
 
     private static let ntfyAppStore = URL(string: "https://apps.apple.com/app/ntfy/id1625396347")!
-    private static let guide = URL(string: "https://github.com/westernpluto/DriftMail#instant-notifications-free")!
 
     var body: some View {
         @Bindable var relay = relay
@@ -21,131 +22,125 @@ struct NotificationSetupView: View {
                         .foregroundStyle(Theme.drift)
                     Text("Instant notifications, free")
                         .font(.title3.weight(.bold))
-                    Text("Your own Cloudflare Worker watches your inboxes around the clock on Cloudflare's free plan and pushes a notification as soon as mail arrives, even when DriftMail is closed.")
+                    Text("DriftMail sets up a tiny relay in your own free Cloudflare account. It checks your inboxes every minute, even when DriftMail is closed, and notifies you through the free ntfy app.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 6)
             }
 
-            Section {
-                Button {
-                    openURL(Self.guide)
-                } label: {
-                    Label("Open the 5-minute deploy guide", systemImage: "book.pages")
-                }
-                TextField("https://driftmail-relay.you.workers.dev", text: $relay.workerURL)
-                    .keyboardType(.URL)
-                    .textContentType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                SecureField("Pairing code", text: $relay.pairingCode)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            } header: {
-                Text("1 · Your relay")
-            } footer: {
-                Text("Deploy it with one click from GitHub Actions (free Cloudflare account, no credit card), then paste its address and the pairing code you chose. Only a phone with the pairing code can take control of your relay.")
+            if relay.isConfigured && relay.lastSyncSucceeded != false && !relay.isSettingUp {
+                connectedSection
             }
 
-            Section {
-                Picker("Deliver with", selection: $relay.delivery) {
-                    ForEach(PushRelay.Delivery.allCases) { Text($0.title).tag($0) }
-                }
-                if relay.delivery == .ntfy {
+            if relay.delivery == .ntfy {
+                Section {
                     Button {
                         openURL(Self.ntfyAppStore)
                     } label: {
-                        Label("Get the free ntfy app", systemImage: "arrow.down.app")
-                    }
-                    LabeledContent("Topic") {
-                        Text(relay.ntfyTopic)
-                            .font(.footnote.monospaced())
-                            .textSelection(.enabled)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        Label("Install ntfy (free)", systemImage: "arrow.down.app")
                     }
                     Button {
                         UIPasteboard.general.string = relay.ntfyTopic
                         copied = true
                     } label: {
-                        Label(copied ? "Copied" : "Copy topic", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        Label(copied ? "Topic copied. Paste it in ntfy." : "Copy my topic",
+                              systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
                     }
-                    DisclosureGroup("Advanced") {
-                        TextField("ntfy server", text: $relay.ntfyServer)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        Button("New random topic") { relay.regenerateTopic(); copied = false }
+                } header: {
+                    Text("1 · Get notified with ntfy")
+                } footer: {
+                    Text("In ntfy, tap +, paste the topic and tap Subscribe. Tapping a notification opens DriftMail on that message.")
+                }
+            }
+
+            Section {
+                Link(destination: CloudflareSetup.signUpURL) {
+                    Label("Create a free Cloudflare account", systemImage: "person.crop.circle.badge.plus")
+                }
+                Link(destination: CloudflareSetup.createTokenURL) {
+                    Label("Create a DriftMail token", systemImage: "key.fill")
+                }
+                HStack {
+                    SecureField("Cloudflare token", text: $cloudflareToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    PasteButton(payloadType: String.self) { strings in
+                        cloudflareToken = strings.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     }
-                } else {
-                    Text("Native push needs DriftMail signed with a paid Apple Developer account and your APNs key stored in the Worker. See the guide.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    LabeledContent("Device token", value: relay.apnsToken == nil ? "Not registered" : "Ready")
+                    .labelStyle(.iconOnly)
+                    .buttonBorderShape(.capsule)
                 }
             } header: {
-                Text("2 · Delivery")
+                Text("2 · Connect Cloudflare")
             } footer: {
-                if relay.delivery == .ntfy {
-                    Text("In ntfy, tap +, paste the topic and subscribe. Tapping a notification opens DriftMail on that message. The topic is a long random secret; keep it private.")
+                Text("The token link opens Cloudflare with everything filled in. Scroll down, tap Continue to summary, then Create Token, and copy it. No credit card is needed.")
+            }
+
+            Section {
+                Button {
+                    Task { await relay.setUpAutomatically(cloudflareToken: cloudflareToken) }
+                } label: {
+                    HStack {
+                        Label(relay.isManagedByApp ? "Set Up Again" : "Set Up Notifications", systemImage: "wand.and.stars")
+                            .font(.headline)
+                        Spacer()
+                        if relay.isSettingUp { ProgressView() }
+                    }
                 }
+                .disabled(cloudflareToken.trimmingCharacters(in: .whitespaces).isEmpty || relay.isSettingUp)
+
+                if let step = relay.setupProgress {
+                    Text(step).font(.footnote).foregroundStyle(.secondary)
+                }
+                statusMessage
+            } header: {
+                Text("3 · One tap")
+            } footer: {
+                Text("DriftMail creates the relay, pairs it with this phone using a secret code only this phone knows, uploads your accounts and sends a test notification. Updates to the relay are installed automatically.")
             }
 
             Section {
                 Toggle("Show sender and subject", isOn: $relay.showPreviews)
+                    .onChange(of: relay.showPreviews) { _, _ in Task { await relay.syncIfConfigured() } }
             } header: {
-                Text("3 · Privacy")
+                Text("Privacy")
             } footer: {
-                Text("Turn this off to receive a plain \u{201C}New mail\u{201D} alert with no details passing through the notification service.")
+                Text("Turn this off to get a plain \u{201C}New mail\u{201D} alert with no details passing through the notification service. Your app passwords are stored encrypted in your own Cloudflare account so the relay can check mail.")
             }
 
             Section {
-                Button {
-                    Task { await relay.sync() }
-                } label: {
-                    HStack {
-                        Label("Connect Accounts to Relay", systemImage: "link")
-                        Spacer()
-                        if relay.isSyncing { ProgressView() }
+                DisclosureGroup("Manual setup & advanced", isExpanded: $showManual) {
+                    Picker("Deliver with", selection: $relay.delivery) {
+                        ForEach(PushRelay.Delivery.allCases) { Text($0.title).tag($0) }
                     }
-                }
-                .disabled(!relay.isConfigured || relay.isSyncing)
-                .help("Pairs this phone using the pairing code, then uploads your accounts.")
-
-                Button {
-                    Task { await relay.sendTest() }
-                } label: {
-                    Label("Send Test Notification", systemImage: "paperplane")
-                }
-                .disabled(!relay.isConfigured)
-
-                if let message = relay.lastMessage {
-                    Label(message, systemImage: relay.lastSyncSucceeded == false ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(relay.lastSyncSucceeded == false ? .red : .green)
-                }
-            } header: {
-                Text("4 · Connect")
-            } footer: {
-                Text("Your app passwords are sent over HTTPS to your own Worker and stored encrypted there so it can check mail for you. Only a phone that knows your pairing code can pair with the relay.")
-            }
-
-            if let status = relay.status, status.configured {
-                Section("Relay status") {
-                    ForEach(status.accounts) { account in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(account.email)
-                            if let error = account.lastError {
-                                Text(error).font(.caption).foregroundStyle(.red)
-                            } else {
-                                Text("Watching").font(.caption).foregroundStyle(.green)
-                            }
+                    if relay.delivery == .apns {
+                        LabeledContent("Device token", value: relay.apnsToken == nil ? "Not registered" : "Ready")
+                    }
+                    TextField("Relay address", text: $relay.workerURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Pairing code", text: $relay.pairingCode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("ntfy server", text: $relay.ntfyServer)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("New random ntfy topic") { relay.regenerateTopic(); copied = false }
+                    Button {
+                        Task { await relay.sync() }
+                    } label: {
+                        HStack {
+                            Text("Connect with these settings")
+                            Spacer()
+                            if relay.isSyncing { ProgressView() }
                         }
                     }
-                    if let lastRun = status.lastRun {
-                        LabeledContent("Last check", value: lastRun)
-                    }
+                    .disabled(!relay.isConfigured || relay.isSyncing)
                 }
+            } footer: {
+                Text("Use this if you deployed the relay yourself from GitHub Actions, or for native Apple push with a paid developer account.")
             }
 
             if relay.isConfigured {
@@ -164,6 +159,41 @@ struct NotificationSetupView: View {
         }
         .onChange(of: relay.delivery) { _, delivery in
             if delivery == .apns { UIApplication.shared.registerForRemoteNotifications() }
+        }
+    }
+
+    @ViewBuilder
+    private var statusMessage: some View {
+        if let message = relay.lastMessage {
+            Label(message, systemImage: relay.lastSyncSucceeded == false ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(relay.lastSyncSucceeded == false ? .red : .green)
+        }
+    }
+
+    private var connectedSection: some View {
+        Section {
+            Label("Notifications are on", systemImage: "checkmark.seal.fill")
+                .foregroundStyle(.green)
+            if let status = relay.status, status.configured {
+                ForEach(status.accounts) { account in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(account.email)
+                        if let error = account.lastError {
+                            Text(error).font(.caption).foregroundStyle(.red)
+                        } else {
+                            Text("Watching").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Button {
+                Task { await relay.sendTest() }
+            } label: {
+                Label("Send Test Notification", systemImage: "paperplane")
+            }
+        } header: {
+            Text("Status")
         }
     }
 }
