@@ -148,6 +148,8 @@ final class PushRelay {
             _ = try await CloudflareSetup.deploy(token: token, pairingCode: pairingCode, encryptionKey: encryptionKey,
                                                  apns: delivery == .apns ? apnsCredentials : nil) { _ in }
             UserDefaults.standard.set(hash, forKey: "relay.deployedHash")
+            // Re-sync so the relay gets anything new it needs (such as the encryption key).
+            await sync()
         } catch {
             // Try again next launch.
         }
