@@ -18,6 +18,9 @@ struct RootView: View {
 struct MailSplitView: View {
     @Environment(MailStore.self) private var store
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
+    // Which column the single-pane (outer display) layout shows.
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .content
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showSettings = false
     @State private var showNotificationSetup = false
     @AppStorage("didOfferNotificationSetup") private var didOfferNotificationSetup = false
@@ -25,7 +28,7 @@ struct MailSplitView: View {
 
     var body: some View {
         @Bindable var store = store
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $preferredCompactColumn) {
             SidebarView(showSettings: $showSettings)
         } content: {
             MessageListView()
@@ -38,6 +41,21 @@ struct MailSplitView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        // A notification opened a message: show it beside the list (sidebar out of
+        // the way) on the inner display, and go straight to it on the outer display.
+        .onChange(of: store.revealRequest) {
+            withAnimation {
+                if columnVisibility != .doubleColumn { columnVisibility = .doubleColumn }
+                preferredCompactColumn = .detail
+            }
+        }
+        // iOS resizes the app while it's in the background (app switcher snapshots),
+        // and the split view can collapse to the message alone. Bring the list back.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, columnVisibility == .detailOnly {
+                columnVisibility = .doubleColumn
+            }
+        }
         .overlay { NewMailToast() }
         .sheet(item: $store.compose) { context in
             ComposeView(context: context)

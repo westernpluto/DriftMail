@@ -21,6 +21,9 @@ final class MailStore {
 
     var selection: MailboxSelection? = .unifiedInbox
     var selectedMessageID: MessageSummary.ID?
+    /// Bumped when a notification opens a message, so the layout brings it to the front
+    /// (even if that message was already selected).
+    var revealRequest = 0
 
     var refreshing: Set<String> = []
     var errorMessage: String?
@@ -503,7 +506,10 @@ final class MailStore {
         await refreshMailbox(box)
         if let uid {
             let id = "\(accountID.uuidString)|\(box.path)|\(uid)"
-            if message(id: id) != nil { selectedMessageID = id }
+            if message(id: id) != nil {
+                selectedMessageID = id
+                revealRequest += 1
+            }
         }
     }
 
