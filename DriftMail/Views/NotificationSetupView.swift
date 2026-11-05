@@ -111,7 +111,7 @@ struct NotificationSetupView: View {
             } header: {
                 Text("Privacy")
             } footer: {
-                Text("Turn this off to get a plain \u{201C}New mail\u{201D} alert with no details passing through the notification service. Your app passwords are stored encrypted in your own Cloudflare account so the relay can check mail.")
+                Text("Applies to ntfy. Turned off, the relay never reads sender or subject and ntfy only sees \u{201C}New mail\u{201D}. Native notifications are always private. Your app passwords are stored encrypted in your own Cloudflare account so the relay can watch your inbox.")
             }
 
             Section {
@@ -196,7 +196,7 @@ struct NotificationSetupView: View {
         } header: {
             Text("1 · Native notifications")
         } footer: {
-            Text("This build is signed with your Apple Developer account, so DriftMail can show its own notifications, end-to-end encrypted so Apple can't read them. In your developer account, create a key with Apple Push Notifications service enabled, download it to Files, and choose it here. The Team ID and bundle ID are filled in automatically.")
+            Text("This build is signed with your Apple Developer account, so DriftMail can show its own notifications. They're private: the relay only learns that a message arrived, and your phone fetches the sender and subject straight from your provider. In your developer account, create a key with Apple Push Notifications service enabled, download it to Files, and choose it here. The Team ID and bundle ID are filled in automatically.")
         }
         .fileImporter(isPresented: $showKeyImporter, allowedContentTypes: [.item]) { result in
             guard case .success(let url) = result else { return }
@@ -226,7 +226,7 @@ struct NotificationSetupView: View {
             Label("Notifications are on", systemImage: "checkmark.seal.fill")
                 .foregroundStyle(.green)
             if relay.isEndToEndEncrypted {
-                Label("End-to-end encrypted: Apple only sees \u{201C}New mail\u{201D}", systemImage: "lock.fill")
+                Label("Private: your phone fetches sender and subject itself. The relay and Apple never see them.", systemImage: "lock.fill")
                     .font(.subheadline)
                     .foregroundStyle(Theme.accent)
             }

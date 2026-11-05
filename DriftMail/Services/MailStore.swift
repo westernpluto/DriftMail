@@ -44,6 +44,17 @@ final class MailStore {
         })
         messagesByMailbox = snapshot.messages
         highestSeenUID = snapshot.highestSeenUID
+        shareAccountsWithExtension()
+    }
+
+    /// Lets the notification extension fetch sender and subject itself, so the
+    /// relay never has to read them (signed builds only; a no-op otherwise).
+    func shareAccountsWithExtension() {
+        var passwords: [UUID: String] = [:]
+        for account in accounts {
+            if let password = Keychain.password(for: account) { passwords[account.id] = password }
+        }
+        SharedAccounts.store(accounts, passwords: passwords)
     }
 
     // MARK: Persistence
@@ -135,6 +146,7 @@ final class MailStore {
         stored.colorIndex = accounts.count
         accounts.append(stored)
         save()
+        shareAccountsWithExtension()
         await loadMailboxes(for: stored)
         await refresh(.mailbox(inbox(for: stored.id)))
         // Everything currently in the inbox counts as already seen.
@@ -150,6 +162,7 @@ final class MailStore {
             Keychain.setPassword(password, for: account)
         }
         if let index = accounts.firstIndex(where: { $0.id == account.id }) { accounts[index] = account }
+        shareAccountsWithExtension()
         await sessions[account.id]?.reset()
         sessions[account.id] = nil
         stopLive(for: account.id)
@@ -163,6 +176,8 @@ final class MailStore {
         sessions[account.id] = nil
         Keychain.deletePassword(for: account)
         accounts.removeAll { $0.id == account.id }
+        SharedAccounts.remove(account.id)
+        shareAccountsWithExtension()
         mailboxes[account.id] = nil
         messagesByMailbox = messagesByMailbox.filter { !$0.key.hasPrefix(account.id.uuidString) }
         if case .mailbox(let box) = selection, box.accountID == account.id { selection = .unifiedInbox }

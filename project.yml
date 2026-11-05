@@ -51,6 +51,13 @@ targets:
         excludes:
           - Info.plist
       - path: Shared
+      # Mail code reused to fetch the new message's details on the phone.
+      - path: DriftMail/Models/Models.swift
+      - path: DriftMail/Models/Providers.swift
+      - path: DriftMail/Mail/MailSocket.swift
+      - path: DriftMail/Mail/IMAPParser.swift
+      - path: DriftMail/Mail/IMAPClient.swift
+      - path: DriftMail/Mail/MIME.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(DRIFT_BUNDLE_ID).NotificationService

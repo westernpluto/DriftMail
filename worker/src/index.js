@@ -98,6 +98,7 @@ async function route(request, env) {
       body: "You'll get a notification like this when new mail arrives.",
       accountId: null,
       uid: null,
+      test: true,
     });
     return json({ ok: true });
   }
@@ -254,10 +255,20 @@ async function runAccount(env, config, account, state, { baselineOnly, idleUntil
   }
 }
 
+/// Private mode: with end-to-end encrypted native push the relay never downloads
+/// sender or subject. It only learns that message #N arrived; the phone fetches
+/// the details itself. The same applies whenever previews are turned off.
+function relayReadsHeaders(config) {
+  const zeroKnowledge = config.delivery?.type === "apns" && !!config.e2eKey;
+  return !zeroKnowledge && config.showPreviews !== false;
+}
+
 /// Fetches messages from the remembered UID onward and notifies for unread ones.
 async function deliverNew(env, config, account, imap, state, persist) {
   const from = state[account.id]?.uidNext || 1;
-  const fetched = await imap.command(`UID FETCH ${from}:* (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])`);
+  const readHeaders = relayReadsHeaders(config);
+  const items = readHeaders ? "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])" : "(UID FLAGS)";
+  const fetched = await imap.command(`UID FETCH ${from}:* ${items}`);
   const messages = [];
   let highest = 0;
   for (const u of fetched.untagged) {
@@ -267,6 +278,10 @@ async function deliverNew(env, config, account, imap, state, persist) {
     if (!uid || uid < from) continue;
     highest = Math.max(highest, uid);
     if (/\\Seen/i.test(u.text)) continue;
+    if (!readHeaders) {
+      messages.push({ uid, title: null, body: null });
+      continue;
+    }
     const headers = parseHeaders(u.literals.map((l) => decodeBytes(l)).join("\n"));
     messages.push({
       uid,
@@ -284,7 +299,7 @@ async function deliverNew(env, config, account, imap, state, persist) {
   }
   const extra = messages.length - MAX_NOTIFICATIONS_PER_ACCOUNT;
   if (extra > 0) {
-    await deliver(env, config, { title: account.email, body: `${extra} more new messages`, accountId: account.id, uid: null });
+    await deliver(env, config, { title: account.email, body: `${extra} more new messages`, accountId: account.id, uid: null, more: extra });
   }
 }
 
@@ -474,7 +489,7 @@ function displayName(from) {
 // ---------------------------------------------------------------------------
 
 async function deliver(env, config, message) {
-  const preview = config.showPreviews !== false;
+  const preview = config.showPreviews !== false && message.title != null;
   const title = preview ? message.title : "New mail";
   const body = preview ? message.body : (message.accountEmail ? `in ${message.accountEmail}` : "Open DriftMail to read it.");
   const params = new URLSearchParams();
@@ -501,7 +516,11 @@ async function deliver(env, config, message) {
     if (config.e2eKey) {
       // End-to-end encrypted: Apple only sees a placeholder and ciphertext.
       // DriftMail's notification extension decrypts it on the phone.
-      const sealed = await sealForPhone(env, config.e2eKey, { title, body, ...reference });
+      // Only a reference to the message: the phone fetches sender and subject itself.
+      const secret = { ...reference };
+      if (message.more) secret.more = message.more;
+      if (message.test) Object.assign(secret, { title: message.title, body: message.body });
+      const sealed = await sealForPhone(env, config.e2eKey, secret);
       payload = {
         aps: { alert: { title: "DriftMail", body: "New mail" }, sound: "default", "mutable-content": 1, "thread-id": "driftmail", category: "NEW_MAIL" },
         enc: sealed,

@@ -131,13 +131,16 @@ In a TestFlight build (or any build signed with your team), DriftMail detects th
 
 The relay stores the key as an encrypted Worker secret and signs Apple Push requests with it. ntfy remains available under **Manual setup & advanced**.
 
-**End-to-end encrypted.** Native notifications are encrypted so that Apple, and anyone else between your relay and your phone, can't read them:
+**Private by design.** With native notifications, the relay never reads your mail's sender or subject, and Apple never sees them either:
 
-- DriftMail creates a random 256-bit key on your phone. It's stored in a keychain group shared only with DriftMail's notification extension. A copy goes to your own relay, where it's stored encrypted.
-- For each new email, the relay encrypts the sender, subject and message reference with AES-256-GCM. Apple's servers only see a placeholder alert ("DriftMail: New mail") plus ciphertext.
-- On your phone, DriftMail's Notification Service Extension decrypts the real sender and subject before the notification appears. If decryption ever fails, you still see "New mail", and tapping still works.
+- DriftMail creates a random 256-bit key on your phone. It's stored in a keychain group shared only with DriftMail's notification extension. A copy goes to your relay, where it's stored encrypted.
+- When mail arrives, the relay asks your provider only for message numbers and read/unread flags. It then sends Apple a placeholder alert ("DriftMail: New mail") plus an AES-256-GCM-encrypted reference: which account, which message.
+- On your phone, DriftMail's Notification Service Extension decrypts the reference and signs in to your provider itself over TLS. It fetches the sender, subject and a preview, and shows the full notification. This takes about a second.
+- If the phone can't reach your provider at that moment, you see "New mail" plus the account, and tapping opens the message once you're online.
 
-Your relay itself does see sender and subject, because it reads them from your mailbox to build the notification. It runs in your own Cloudflare account. This is the same trust model as any server that checks mail for you.
+So sender, subject and content exist only at your mail provider and on your phone. What remains true: the relay holds your app passwords so it can watch the inbox. It never reads mail, but someone who took over your Cloudflare account could. App passwords can be revoked at any time. Regular email isn't end-to-end encrypted at the provider in the first place.
+
+With ntfy, turning off **Show sender and subject** puts the relay in the same no-read mode, and ntfy only sees "New mail".
 
 ### Free-plan budget
 
