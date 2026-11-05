@@ -30,7 +30,7 @@ struct MailSplitView: View {
     var body: some View {
         @Bindable var store = store
         NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $preferredCompactColumn) {
-            SidebarView(showSettings: $showSettings)
+            SidebarView(showSettings: $showSettings, showsCompose: horizontalSizeClass != .regular)
         } content: {
             MessageListView()
         } detail: {
@@ -131,15 +131,7 @@ struct EmptyDetailView: View {
             .multilineTextAlignment(.center)
             .padding()
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    store.compose = ComposeContext(mode: .new)
-                } label: {
-                    Label("New Message", systemImage: "square.and.pencil")
-                }
-            }
-            .visibilityPriority(.high)
-        }
+        // No New Message here: this only appears on the inner display, where the
+        // message list beside it already has one.
     }
 }

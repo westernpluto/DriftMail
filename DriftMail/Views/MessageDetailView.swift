@@ -15,17 +15,27 @@ struct MessageDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                // The text stays at a readable width, but the tint spans the whole
+                // column so it can extend under the side toolbar on iPhone Duo.
                 header
-                content
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                if let attachments = body_?.visibleAttachments, !attachments.isEmpty {
-                    attachmentGrid(attachments)
-                        .padding()
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                    .background {
+                        Theme.softDrift
+                            .backgroundExtensionEffect()
+                    }
+                VStack(alignment: .leading, spacing: 0) {
+                    content
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                    if let attachments = body_?.visibleAttachments, !attachments.isEmpty {
+                        attachmentGrid(attachments)
+                            .padding()
+                    }
                 }
+                .frame(maxWidth: 820)
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: 820)
-            .frame(maxWidth: .infinity)
         }
         .background(Color(uiColor: .systemBackground))
         .navigationTitle("")
@@ -89,11 +99,6 @@ struct MessageDetailView: View {
             }
         }
         .padding()
-        .background {
-            // The tint extends under the side toolbar on iPhone Duo instead of stopping at it.
-            Theme.softDrift
-                .backgroundExtensionEffect()
-        }
     }
 
     private var recipientsLine: String {

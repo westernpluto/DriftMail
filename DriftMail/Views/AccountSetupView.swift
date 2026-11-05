@@ -129,10 +129,12 @@ struct AccountSetupView: View {
                     Button {
                         Task { await submit() }
                     } label: {
-                        if isWorking { ProgressView() } else { Label("Sign In", systemImage: "checkmark") }
+                        // Title + symbol even while working, so it stays in the vertical toolbar.
+                        Label(isWorking ? "Signing In…" : "Sign In", systemImage: "checkmark")
+                            .symbolEffect(.pulse, isActive: isWorking)
                     }
                     .buttonStyle(.glassProminent)
-                    .disabled(!canSubmit)
+                    .disabled(!canSubmit || isWorking)
                 }
             }
             .onAppear(perform: load)

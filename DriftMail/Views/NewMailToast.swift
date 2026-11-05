@@ -29,7 +29,7 @@ struct NewMailToast: View {
 
     private func toast(_ banner: NewMailBanner) -> some View {
         Button {
-            store.selectedMessageID = banner.messageID
+            store.reveal(banner.messageID)
             withAnimation(.smooth) { store.banner = nil }
         } label: {
             HStack(spacing: 12) {

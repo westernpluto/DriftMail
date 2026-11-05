@@ -207,11 +207,10 @@ struct ComposeView: View {
             Button {
                 Task { await send() }
             } label: {
-                if isSending {
-                    ProgressView()
-                } else {
-                    Label("Send", systemImage: "paperplane.fill")
-                }
+                // Always a title + symbol (never a custom spinner view), so the button
+                // can stay in the vertical side toolbar on iPhone Duo while sending.
+                Label(isSending ? "Sending…" : "Send", systemImage: "paperplane.fill")
+                    .symbolEffect(.pulse, isActive: isSending)
             }
             .buttonStyle(.glassProminent)
             .disabled(!canSend)

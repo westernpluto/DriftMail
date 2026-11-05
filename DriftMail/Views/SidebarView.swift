@@ -4,6 +4,9 @@ struct SidebarView: View {
     @Environment(MailStore.self) private var store
     @Environment(PushRelay.self) private var relay
     @Binding var showSettings: Bool
+    /// Only on the outer display, where the mailboxes are shown on their own. On the
+    /// inner display the message list beside it already has New Message.
+    var showsCompose = true
 
     var body: some View {
         @Bindable var store = store
@@ -45,14 +48,16 @@ struct SidebarView: View {
         .navigationTitle("DriftMail")
         .refreshable { await store.refreshAll() }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    store.compose = ComposeContext(mode: .new)
-                } label: {
-                    Label("New Message", systemImage: "square.and.pencil")
+            if showsCompose {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        store.compose = ComposeContext(mode: .new)
+                    } label: {
+                        Label("New Message", systemImage: "square.and.pencil")
+                    }
                 }
+                .visibilityPriority(.high)
             }
-            .visibilityPriority(.high)
 
             ToolbarItem(placement: .secondaryAction) {
                 Button {

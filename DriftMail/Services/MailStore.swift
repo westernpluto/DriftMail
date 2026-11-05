@@ -506,11 +506,15 @@ final class MailStore {
         await refreshMailbox(box)
         if let uid {
             let id = "\(accountID.uuidString)|\(box.path)|\(uid)"
-            if message(id: id) != nil {
-                selectedMessageID = id
-                revealRequest += 1
-            }
+            if message(id: id) != nil { reveal(id) }
         }
+    }
+
+    /// Selects a message and brings it to the front of the layout (used for
+    /// notification taps and the in-app new-mail toast).
+    func reveal(_ id: MessageSummary.ID) {
+        selectedMessageID = id
+        revealRequest += 1
     }
 
     // MARK: Errors
