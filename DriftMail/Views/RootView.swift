@@ -54,10 +54,15 @@ struct MailSplitView: View {
         // and hides the mailbox sidebar), but the split view can fall into one by
         // itself, e.g. when iOS resizes the app in the background for app switcher
         // snapshots. Undo it right away on the inner display, and again on return.
-        .onChange(of: columnVisibility) { _, visibility in
-            if visibility == .detailOnly, horizontalSizeClass == .regular {
-                columnVisibility = .doubleColumn
-            }
+        .onChange(of: columnVisibility) {
+            keepListVisible(sizeClass: horizontalSizeClass)
+        }
+        // While iOS resizes the app in the background, the visibility can flip to
+        // detail-only before this view sees the new (regular) size class, so the
+        // check above would still read "compact" and skip it. Check again when the
+        // size class itself changes, so it's caught whichever change comes first.
+        .onChange(of: horizontalSizeClass) { _, sizeClass in
+            keepListVisible(sizeClass: sizeClass)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, columnVisibility == .detailOnly {
@@ -97,6 +102,15 @@ struct MailSplitView: View {
             Button("OK", role: .cancel) { store.errorMessage = nil }
         } message: {
             Text(store.errorMessage ?? "")
+        }
+    }
+}
+
+extension MailSplitView {
+    /// On the inner display (regular width), never stay in a message-only layout.
+    fileprivate func keepListVisible(sizeClass: UserInterfaceSizeClass?) {
+        if sizeClass == .regular, columnVisibility == .detailOnly {
+            columnVisibility = .doubleColumn
         }
     }
 }
