@@ -58,6 +58,16 @@ async function route(request, env) {
   if (url.pathname === "/v1/sync" && request.method === "POST") {
     const body = await request.json();
     const delivery = validateDelivery(body.delivery);
+    // Keep the push environment learned from Apple (see deliver()) while the
+    // device token is unchanged: re-signed builds can't tell which environment
+    // they were signed for, so the phone's own guess would undo it on every sync.
+    if (delivery.type === "apns") {
+      const previous = (await loadConfig(env))?.delivery;
+      if (previous?.type === "apns" && previous.token === delivery.token && previous.learnedEnvironment) {
+        delivery.environment = previous.learnedEnvironment;
+        delivery.learnedEnvironment = previous.learnedEnvironment;
+      }
+    }
     const accounts = Array.isArray(body.accounts) ? body.accounts : [];
     if (accounts.length > 10) return json({ error: "At most 10 accounts are supported." }, 400);
     const stored = [];
@@ -569,6 +579,7 @@ async function deliver(env, config, message) {
       response = await send(other);
       if (response.ok) {
         d.environment = other;
+        d.learnedEnvironment = other;
         await env.DRIFT.put(CONFIG_KEY, JSON.stringify(config));
         return;
       }
