@@ -213,10 +213,10 @@ enum MIME {
         var i = 0
         func hex(_ b: UInt8) -> UInt8? {
             switch b {
-            case 48...57: b - 48
-            case 65...70: b - 55
-            case 97...102: b - 87
-            default: nil
+            case 48...57: return b - 48
+            case 65...70: return b - 55
+            case 97...102: return b - 87
+            default: return nil
             }
         }
         while i < bytes.count {

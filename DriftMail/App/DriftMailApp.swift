@@ -26,13 +26,13 @@ struct DriftMailApp: App {
             case .background:
                 store.stopLive()
                 NotificationService.updateBadge(store.unreadCount(.unifiedInbox))
-                Self.scheduleBackgroundRefresh()
+                Task { await Self.scheduleBackgroundRefresh() }
             default:
                 break
             }
         }
         .backgroundTask(.appRefresh(Self.refreshTaskID)) {
-            await Self.scheduleBackgroundRefreshAsync()
+            await Self.scheduleBackgroundRefresh()
             await MailStore.shared.backgroundCheck()
         }
     }
@@ -51,14 +51,9 @@ struct DriftMailApp: App {
         }
     }
 
-    static func scheduleBackgroundRefresh() {
+    static func scheduleBackgroundRefresh() async {
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskID)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
-        try? BGTaskScheduler.shared.submit(request)
-    }
-
-    @MainActor
-    static func scheduleBackgroundRefreshAsync() async {
-        scheduleBackgroundRefresh()
+        try? await BGTaskScheduler.shared.submitTaskRequest(request)
     }
 }
