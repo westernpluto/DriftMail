@@ -25,7 +25,7 @@ struct NotificationSetupView: View {
                         .foregroundStyle(Theme.drift)
                     Text("Instant notifications, free")
                         .font(.title3.weight(.bold))
-                    Text("DriftMail sets up a tiny relay in your own free Cloudflare account. It checks your inboxes every minute, even when DriftMail is closed, and notifies you through the free ntfy app.")
+                    Text("DriftMail sets up a tiny relay in your own free Cloudflare account. It stays connected to your inboxes around the clock, even when DriftMail is closed, and notifies you within seconds of new mail arriving.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

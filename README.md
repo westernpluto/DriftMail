@@ -4,7 +4,7 @@ A free, good-looking mail app for iPhone, built for **iPhone Duo**. It puts Gmai
 
 - **Unified inbox** with per-account colours, search, swipe actions, flags, archive, trash and junk.
 - **Live while open**: DriftMail keeps an IMAP IDLE connection to every inbox, so new mail appears right away.
-- **Notifications while closed, free**: a Cloudflare Worker on the free plan checks your inboxes every minute and sends a push.
+- **Notifications while closed, free**: a Cloudflare Worker on the free plan stays connected to your inboxes and sends a push within seconds.
 - **Compose** replies, reply-all and forwards, with photo and file attachments.
 - **Private**: DriftMail talks to your providers directly and keeps passwords in the iOS Keychain. The relay is optional, and it runs in your own Cloudflare account.
 
@@ -67,12 +67,12 @@ The app has a button that opens the right page for each provider.
 iOS won't let a free, sideloaded app keep a mail connection open in the background. So DriftMail uses a small relay that you run yourself on **Cloudflare Workers' free plan**. No credit card is needed.
 
 ```
- your inboxes ──IMAP (every minute)──▶ Cloudflare Worker ──push──▶ ntfy app ──tap──▶ DriftMail opens the message
+ your inboxes ──IMAP IDLE (live)──▶ Cloudflare Worker ──push──▶ ntfy app ──tap──▶ DriftMail opens the message
 ```
 
 - **Delivery with ntfy (free, recommended).** The free [ntfy](https://apps.apple.com/app/ntfy/id1625396347) app receives the push. Tapping it opens DriftMail on that message (`driftmail://` link). This works with any free sideloaded build.
 - **Native push.** If you sign DriftMail with a **paid** Apple Developer account, the Worker can send through Apple Push directly (see below). Apple doesn't allow push for free Apple IDs, which is why ntfy is the default.
-- **Speed.** The Worker checks every minute, the shortest interval the free plan allows, so a notification arrives at most about a minute after the email does. While DriftMail is open, new mail shows up right away over IMAP IDLE.
+- **Speed: seconds.** A free-plan Cron Trigger starts the Worker every minute. Each run catches up on anything new, then keeps the connection open in **IMAP IDLE** for about 50 seconds, so the mail server tells the Worker the instant a message lands. The next run takes over a few seconds later, and its catch-up step covers that short gap. Waiting doesn't count toward the free plan's CPU limit. If a provider doesn't support IDLE, the Worker falls back to checking once a minute. Up to 5 accounts can be watched live at once (the free plan allows 6 open connections per run).
 
 ### Set it up from the app (recommended, about 2 minutes)
 
@@ -84,7 +84,7 @@ Open **Settings → Instant Notifications** in DriftMail:
 
 DriftMail then does the rest:
 - creates the storage and uploads the relay to your Cloudflare account
-- schedules the once-a-minute check
+- schedules the relay so it stays connected to your inboxes
 - turns on the relay's `workers.dev` address
 - pairs the relay with your phone using a random secret code
 - uploads your accounts and sends a test notification
@@ -139,6 +139,8 @@ The relay stores the key as an encrypted Worker secret and signs Apple Push requ
 | KV reads | 100,000 / day | ~3 per run (~4,300 / day) |
 | KV writes | 1,000 / day | only when new mail arrives or errors change, plus 1 status write every 30 min |
 | Cron triggers | 5 | 1 |
+| CPU per run | 10 ms | a few ms; time spent waiting in IDLE doesn't count |
+| Wall time per cron run | 15 min | ~50 s |
 
 ## TestFlight (paid Apple Developer account)
 

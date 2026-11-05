@@ -1,11 +1,14 @@
 // DriftMail relay — a Cloudflare Worker that runs on the free plan.
 //
-// Every minute a Cron Trigger signs in to each of your IMAP inboxes, asks the
-// server for the next UID, and when new mail has arrived sends a push
-// notification through ntfy (free) or Apple Push Notification service.
+// Every minute a Cron Trigger signs in to each of your IMAP inboxes, catches up
+// on anything new, then keeps the connection open in IMAP IDLE for ~50 seconds
+// so the mail server tells us the instant a message arrives. The next minute's
+// run takes over, so notifications arrive within seconds, around the clock.
+// Pushes go through ntfy (free) or Apple Push Notification service.
 //
-// Free-plan budget: 1 cron per minute, ~3 KV reads per run, and KV writes only
-// when something changes (new mail, an error appearing or clearing).
+// Free-plan budget: 1 cron per minute (15 min wall time allowed, waiting does
+// not count as CPU), ~3 KV reads per run, and KV writes only when something
+// changes (new mail, an error appearing or clearing).
 
 import { connect } from "cloudflare:sockets";
 
@@ -15,6 +18,7 @@ const OWNER_KEY = "owner";
 const STATUS_KEY = "status";
 const APNS_JWT_KEY = "apns-jwt";
 const MAX_NOTIFICATIONS_PER_ACCOUNT = 5;
+const DEFAULT_IDLE_SECONDS = 50;   // stay connected this long per one-minute run
 
 export default {
   async fetch(request, env, ctx) {
@@ -26,7 +30,10 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(checkAll(env));
+    const configured = Number(env.IDLE_SECONDS);
+    const seconds = Number.isFinite(configured) && env.IDLE_SECONDS !== undefined ? configured : DEFAULT_IDLE_SECONDS;
+    const idleUntil = seconds > 0 ? Date.now() + Math.min(seconds, 55) * 1000 : 0;
+    await checkAll(env, { idleUntil });
   },
 };
 
@@ -164,32 +171,19 @@ async function loadConfig(env) {
   return env.DRIFT.get(CONFIG_KEY, "json");
 }
 
-async function checkAll(env, { baselineOnly = false } = {}) {
+async function checkAll(env, { baselineOnly = false, idleUntil = 0 } = {}) {
   const config = await loadConfig(env);
   if (!config || !config.accounts?.length) return {};
   const state = (await env.DRIFT.get(STATE_KEY, "json")) || {};
   const previousStatus = (await env.DRIFT.get(STATUS_KEY, "json")) || {};
   const errors = {};
-  let stateChanged = false;
+  const persist = () => env.DRIFT.put(STATE_KEY, JSON.stringify(state));
 
-  // Check accounts in parallel (the free plan allows 6 simultaneous connections).
+  // Accounts run in parallel, each on its own connection.
   await Promise.all(
     config.accounts.map(async (account) => {
       try {
-        const result = await checkAccount(env, account, state[account.id], baselineOnly);
-        if (result.changed) {
-          state[account.id] = result.state;
-          stateChanged = true;
-        }
-        if (!baselineOnly) {
-          for (const message of result.messages.slice(-MAX_NOTIFICATIONS_PER_ACCOUNT)) {
-            await deliver(env, config, { ...message, accountId: account.id, accountEmail: account.email });
-          }
-          const extra = result.messages.length - MAX_NOTIFICATIONS_PER_ACCOUNT;
-          if (extra > 0) {
-            await deliver(env, config, { title: account.email, body: `${extra} more new messages`, accountId: account.id, uid: null });
-          }
-        }
+        await runAccount(env, config, account, state, { baselineOnly, idleUntil, persist });
       } catch (error) {
         errors[account.id] = String(error?.message || error).slice(0, 200);
       }
@@ -197,13 +191,14 @@ async function checkAll(env, { baselineOnly = false } = {}) {
   );
 
   // Drop state for removed accounts.
+  let pruned = false;
   for (const id of Object.keys(state)) {
     if (!config.accounts.some((a) => a.id === id)) {
       delete state[id];
-      stateChanged = true;
+      pruned = true;
     }
   }
-  if (stateChanged) await env.DRIFT.put(STATE_KEY, JSON.stringify(state));
+  if (pruned) await persist();
 
   // Write status only when errors change or every 30 minutes (keeps KV writes tiny).
   const now = Date.now();
@@ -215,47 +210,74 @@ async function checkAll(env, { baselineOnly = false } = {}) {
   return state;
 }
 
-async function checkAccount(env, account, previous, baselineOnly) {
+/// Signs in, catches up on anything that arrived since the last run, then (when
+/// `idleUntil` is set) waits in IMAP IDLE and notifies the moment mail arrives.
+async function runAccount(env, config, account, state, { baselineOnly, idleUntil, persist }) {
   const password = await decrypt(env, account.password);
   const imap = new Imap(account.host, account.port);
   try {
     await imap.greeting();
     await imap.command(`LOGIN ${quote(account.username)} ${quote(password)}`);
-    const status = await imap.command("STATUS INBOX (UIDNEXT UIDVALIDITY)");
-    const line = status.untagged.map((u) => u.text).find((t) => /STATUS/i.test(t)) || "";
-    const uidNext = Number((line.match(/UIDNEXT (\d+)/i) || [])[1] || 0);
-    const uidValidity = Number((line.match(/UIDVALIDITY (\d+)/i) || [])[1] || 0);
-    const fresh = { uidNext, uidValidity };
+    const capabilities = (await imap.command("CAPABILITY")).untagged.map((u) => u.text).join(" ");
+    const examined = (await imap.command("EXAMINE INBOX")).untagged.map((u) => u.text).join("\n");
+    const uidNext = Number((examined.match(/UIDNEXT (\d+)/i) || [])[1] || 0);
+    const uidValidity = Number((examined.match(/UIDVALIDITY (\d+)/i) || [])[1] || 0);
+    const previous = state[account.id];
 
     if (!previous || previous.uidValidity !== uidValidity || baselineOnly) {
-      const changed = !previous || previous.uidNext !== uidNext || previous.uidValidity !== uidValidity;
-      return { changed, state: fresh, messages: [] };
-    }
-    if (uidNext <= previous.uidNext) {
-      return { changed: false, state: previous, messages: [] };
+      // First run (or the mailbox was rebuilt): remember where we are, notify nothing.
+      if (!previous || previous.uidNext !== uidNext || previous.uidValidity !== uidValidity) {
+        state[account.id] = { uidNext, uidValidity };
+        await persist();
+      }
+      if (baselineOnly) return;
+    } else if (uidNext > previous.uidNext) {
+      await deliverNew(env, config, account, imap, state, persist);
     }
 
-    await imap.command("EXAMINE INBOX");
-    const fetched = await imap.command(
-      `UID FETCH ${previous.uidNext}:* (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])`
-    );
-    const messages = [];
-    for (const u of fetched.untagged) {
-      if (!/ FETCH /i.test(u.text)) continue;
-      const uid = Number((u.text.match(/UID (\d+)/i) || [])[1] || 0);
-      if (!uid || uid < previous.uidNext) continue;
-      if (/\\Seen/i.test(u.text)) continue;
-      const headers = parseHeaders(u.literals.map((l) => decodeBytes(l)).join("\n"));
-      messages.push({
-        uid,
-        title: displayName(decodeWords(headers.from || "")) || "New mail",
-        body: decodeWords(headers.subject || "") || "(No subject)",
-      });
+    if (!idleUntil || !/\bIDLE\b/i.test(capabilities)) return;
+    // Live phase: the server pushes "* n EXISTS" the instant new mail lands.
+    while (idleUntil - Date.now() > 3000) {
+      const changed = await imap.idle(idleUntil - Date.now());
+      if (!changed) break;
+      await deliverNew(env, config, account, imap, state, persist);
     }
-    messages.sort((a, b) => a.uid - b.uid);
-    return { changed: true, state: fresh, messages };
   } finally {
     imap.close();
+  }
+}
+
+/// Fetches messages from the remembered UID onward and notifies for unread ones.
+async function deliverNew(env, config, account, imap, state, persist) {
+  const from = state[account.id]?.uidNext || 1;
+  const fetched = await imap.command(`UID FETCH ${from}:* (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])`);
+  const messages = [];
+  let highest = 0;
+  for (const u of fetched.untagged) {
+    if (!/ FETCH /i.test(u.text)) continue;
+    const uid = Number((u.text.match(/UID (\d+)/i) || [])[1] || 0);
+    // "UID n:*" also returns the newest message when nothing is >= n; skip it.
+    if (!uid || uid < from) continue;
+    highest = Math.max(highest, uid);
+    if (/\\Seen/i.test(u.text)) continue;
+    const headers = parseHeaders(u.literals.map((l) => decodeBytes(l)).join("\n"));
+    messages.push({
+      uid,
+      title: displayName(decodeWords(headers.from || "")) || "New mail",
+      body: decodeWords(headers.subject || "") || "(No subject)",
+    });
+  }
+  if (!highest) return;
+  // Save progress before sending so an overlapping run never notifies twice.
+  state[account.id] = { ...state[account.id], uidNext: highest + 1 };
+  await persist();
+  messages.sort((a, b) => a.uid - b.uid);
+  for (const message of messages.slice(-MAX_NOTIFICATIONS_PER_ACCOUNT)) {
+    await deliver(env, config, { ...message, accountId: account.id, accountEmail: account.email });
+  }
+  const extra = messages.length - MAX_NOTIFICATIONS_PER_ACCOUNT;
+  if (extra > 0) {
+    await deliver(env, config, { title: account.email, body: `${extra} more new messages`, accountId: account.id, uid: null });
   }
 }
 
@@ -263,12 +285,15 @@ async function checkAccount(env, account, previous, baselineOnly) {
 // Minimal IMAP over TLS (cloudflare:sockets)
 // ---------------------------------------------------------------------------
 
+const TIMED_OUT = Symbol("timeout");
+
 class Imap {
   constructor(host, port) {
     this.socket = connect({ hostname: host, port }, { secureTransport: "on", allowHalfOpen: false });
     this.reader = this.socket.readable.getReader();
     this.writer = this.socket.writable.getWriter();
     this.buffer = new Uint8Array(0);
+    this.pending = null;   // a read that outlived a timeout is reused, so no data is lost
     this.tag = 0;
     this.encoder = new TextEncoder();
   }
@@ -278,16 +303,31 @@ class Imap {
     try { this.socket.close(); } catch {}
   }
 
-  async fill() {
-    const { value, done } = await withTimeout(this.reader.read(), 20000, "IMAP server timed out");
+  /// Reads more bytes. Returns false on timeout when `soft`, otherwise throws.
+  async fill(deadline, soft = false) {
+    if (!this.pending) {
+      this.pending = this.reader.read();
+      this.pending.catch(() => {});
+    }
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadline - Date.now())); });
+    const result = await Promise.race([this.pending, timeout]);
+    clearTimeout(timer);
+    if (result === TIMED_OUT) {
+      if (soft) return false;
+      throw new Error("IMAP server timed out");
+    }
+    this.pending = null;
+    const { value, done } = result;
     if (done) throw new Error("IMAP connection closed");
     const merged = new Uint8Array(this.buffer.length + value.length);
     merged.set(this.buffer);
     merged.set(value, this.buffer.length);
     this.buffer = merged;
+    return true;
   }
 
-  async readLine() {
+  async readLine(deadline, soft = false) {
     while (true) {
       for (let i = 0; i + 1 < this.buffer.length; i++) {
         if (this.buffer[i] === 13 && this.buffer[i + 1] === 10) {
@@ -296,28 +336,31 @@ class Imap {
           return new TextDecoder("latin1").decode(line);
         }
       }
-      await this.fill();
+      if (!(await this.fill(deadline, soft))) return null;
     }
   }
 
   async readBytes(n) {
-    while (this.buffer.length < n) await this.fill();
+    while (this.buffer.length < n) await this.fill(Date.now() + 20000);
     const out = this.buffer.slice(0, n);
     this.buffer = this.buffer.slice(n);
     return out;
   }
 
-  /// Reads one response; literals are collected separately.
-  async readResponse() {
+  /// Reads one response; literals are collected separately. With `soft`, returns
+  /// null if nothing arrives before the deadline.
+  async readResponse(deadline = Date.now() + 20000, soft = false) {
     let text = "";
     const literals = [];
+    let line = await this.readLine(deadline, soft);
+    if (line === null) return null;
     while (true) {
-      const line = await this.readLine();
       const m = line.match(/\{(\d+)\+?\}$/);
       text += line;
       if (!m) break;
       literals.push(await this.readBytes(Number(m[1])));
       text += " ";
+      line = await this.readLine(Date.now() + 20000);
     }
     return { text, literals };
   }
@@ -344,19 +387,38 @@ class Imap {
       if (r.text.startsWith("*")) untagged.push(r);
     }
   }
+
+  /// IMAP IDLE (RFC 2177). Resolves true as soon as new mail is announced,
+  /// false when `ms` pass quietly.
+  async idle(ms) {
+    const tag = `W${++this.tag}`;
+    await this.writer.write(this.encoder.encode(`${tag} IDLE\r\n`));
+    while (true) {
+      const r = await this.readResponse();
+      if (r.text.startsWith("+")) break;
+      if (r.text.startsWith(`${tag} `)) throw new Error(`IDLE refused: ${r.text}`);
+    }
+    const end = Date.now() + ms;
+    let changed = false;
+    while (!changed) {
+      const r = await this.readResponse(end, true);
+      if (r === null) break;
+      if (/^\* \d+ EXISTS/i.test(r.text)) changed = true;
+      else if (/^\* BYE/i.test(r.text)) throw new Error("The mail server ended the connection");
+    }
+    await this.writer.write(this.encoder.encode("DONE\r\n"));
+    while (true) {
+      const r = await this.readResponse();
+      if (r.text.startsWith(`${tag} `)) break;
+    }
+    return changed;
+  }
 }
 
 function quote(s) {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function withTimeout(promise, ms, message) {
-  let timer;
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
-  ]).finally(() => clearTimeout(timer));
-}
 
 // ---------------------------------------------------------------------------
 // Header decoding

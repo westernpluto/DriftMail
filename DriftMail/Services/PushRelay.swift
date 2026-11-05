@@ -3,7 +3,7 @@ import Observation
 import UIKit
 
 /// Talks to the DriftMail relay, a free Cloudflare Worker you deploy yourself.
-/// The Worker watches your inboxes every minute and sends a push the moment
+/// The Worker stays connected to your inboxes (IMAP IDLE) and sends a push the moment
 /// new mail lands, even when DriftMail is closed.
 @MainActor
 @Observable
@@ -271,7 +271,7 @@ final class PushRelay {
                 "accounts": accounts,
             ])
             lastSyncSucceeded = true
-            lastMessage = "Connected. Your Worker now checks \(accounts.count) inbox\(accounts.count == 1 ? "" : "es") every minute."
+            lastMessage = "Connected. Your Worker now watches \(accounts.count) inbox\(accounts.count == 1 ? "" : "es") live."
             await refreshStatus()
         } catch {
             lastSyncSucceeded = false
