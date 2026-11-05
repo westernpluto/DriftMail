@@ -32,6 +32,14 @@ enum CloudflareSetup {
 
     static let signUpURL = URL(string: "https://dash.cloudflare.com/sign-up/workers-and-pages")!
 
+    /// Apple Push credentials stored as Worker secrets (paid developer accounts).
+    struct APNsCredentials {
+        var key: String       // contents of AuthKey_XXXXXXXXXX.p8
+        var keyID: String
+        var teamID: String
+        var bundleID: String
+    }
+
     struct Result {
         var url: String
         var pairingCode: String
@@ -49,6 +57,7 @@ enum CloudflareSetup {
     // MARK: Deploy
 
     static func deploy(token: String, pairingCode: String, encryptionKey: String,
+                       apns: APNsCredentials? = nil,
                        progress: @MainActor (String) -> Void) async throws -> Result {
         guard let script = bundledScript else { throw SetupError("The relay code is missing from this build.") }
         let api = API(token: token)
@@ -75,14 +84,23 @@ enum CloudflareSetup {
         }
 
         await progress("Uploading the relay…")
+        var bindings: [[String: Any]] = [
+            ["type": "kv_namespace", "name": "DRIFT", "namespace_id": namespaceID],
+            ["type": "secret_text", "name": "PAIRING_CODE", "text": pairingCode],
+            ["type": "secret_text", "name": "ENC_KEY", "text": encryptionKey],
+        ]
+        if let apns {
+            bindings += [
+                ["type": "secret_text", "name": "APNS_KEY", "text": apns.key],
+                ["type": "secret_text", "name": "APNS_KEY_ID", "text": apns.keyID],
+                ["type": "secret_text", "name": "APNS_TEAM_ID", "text": apns.teamID],
+                ["type": "secret_text", "name": "APNS_BUNDLE_ID", "text": apns.bundleID],
+            ]
+        }
         let metadata: [String: Any] = [
             "main_module": "index.js",
             "compatibility_date": compatibilityDate,
-            "bindings": [
-                ["type": "kv_namespace", "name": "DRIFT", "namespace_id": namespaceID],
-                ["type": "secret_text", "name": "PAIRING_CODE", "text": pairingCode],
-                ["type": "secret_text", "name": "ENC_KEY", "text": encryptionKey],
-            ],
+            "bindings": bindings,
             "observability": ["enabled": true],
         ]
         _ = try await api.upload("/accounts/\(accountID)/workers/scripts/\(scriptName)", metadata: metadata, script: script)

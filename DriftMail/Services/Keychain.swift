@@ -43,6 +43,30 @@ enum Keychain {
         SecItemDelete(query as CFDictionary)
     }
 
+    /// The signing Team ID, read from the app's keychain access group ("TEAMID.bundle.id").
+    /// Nil for unsigned builds.
+    static func teamID() -> String? {
+        let key = "driftmail.team-probe"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: AnyObject?
+        var status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            set("probe", for: key)
+            status = SecItemCopyMatching(query as CFDictionary, &result)
+        }
+        guard status == errSecSuccess,
+              let attributes = result as? [String: Any],
+              let group = attributes[kSecAttrAccessGroup as String] as? String,
+              let prefix = group.split(separator: ".").first,
+              prefix.count == 10 else { return nil }
+        return String(prefix)
+    }
+
     static func password(for account: MailAccount) -> String? { get("account.\(account.id.uuidString)") }
     static func setPassword(_ password: String, for account: MailAccount) { set(password, for: "account.\(account.id.uuidString)") }
     static func deletePassword(for account: MailAccount) { delete("account.\(account.id.uuidString)") }

@@ -40,6 +40,8 @@ https://github.com/westernpluto/DriftMail/releases/latest/download/altstore-sour
 
 Then install DriftMail from it. New versions appear as updates, and AltStore/SideStore re-sign the app in the background before the free 7-day signature expires. If you use a fork, swap in your own `owner/repo`.
 
+**With a paid Apple Developer account: TestFlight (recommended).** See [TestFlight](#testflight-paid-apple-developer-account) below. Every push to `main` lands in the TestFlight app automatically, with no 7-day limit and native notifications.
+
 **Alternative: Sideloadly.** Download `DriftMail.ipa` from the [latest release](../../releases/latest) and install it with [Sideloadly](https://sideloadly.io). With a free Apple ID you have to repeat this every 7 days.
 
 The app requires iOS 27.1 or later, the first release with the iPhone Duo APIs. To build locally on a Mac with Xcode 27.1, run `brew install xcodegen && xcodegen generate && open DriftMail.xcodeproj`.
@@ -119,12 +121,15 @@ npx wrangler secret put PAIRING_CODE            # the code you'll type into the 
 - Turn off **Show sender and subject** if you'd rather not have message details pass through ntfy.sh. You can also self-host ntfy and change the server under **Advanced**. Set an `NTFY_TOKEN` secret if your server requires auth.
 - **Disconnect Relay** in the app deletes your accounts from the Worker.
 
-### Native Apple push (optional, paid developer account)
+### Native notifications (paid Apple Developer account)
 
-1. Sign DriftMail with your team. The app already includes the `aps-environment` entitlement.
-2. Create an APNs key (.p8) in your developer account.
-3. Add the repo secrets `APNS_KEY` (the .p8 contents), `APNS_KEY_ID`, `APNS_TEAM_ID` and `APNS_BUNDLE_ID` (your bundle ID). Re-run **Deploy notification relay**.
-4. In DriftMail, set **Deliver with** to **Native push** and tap **Connect**.
+In a TestFlight build (or any build signed with your team), DriftMail detects that push is available and shows **Native notifications** in place of the ntfy step:
+
+1. In your developer account, go to **Keys → +** and create a key with **Apple Push Notifications service (APNs)** enabled. Download the `AuthKey_XXXXXXXXXX.p8` file and save it to the Files app (iCloud Drive works).
+2. In DriftMail → **Instant Notifications**, tap **Choose the .p8 key file**. DriftMail reads the Key ID from the file name, and the Team ID and bundle ID from the app itself.
+3. Paste your Cloudflare token and tap **Set Up Notifications**. If you already set up ntfy, tap **Switch to Native Notifications** instead.
+
+The relay stores the key as an encrypted Worker secret and signs Apple Push requests with it. ntfy remains available under **Manual setup & advanced**.
 
 ### Free-plan budget
 
@@ -134,6 +139,19 @@ npx wrangler secret put PAIRING_CODE            # the code you'll type into the 
 | KV reads | 100,000 / day | ~3 per run (~4,300 / day) |
 | KV writes | 1,000 / day | only when new mail arrives or errors change, plus 1 status write every 30 min |
 | Cron triggers | 5 | 1 |
+
+## TestFlight (paid Apple Developer account)
+
+`.github/workflows/testflight.yml` signs DriftMail with your team and uploads it to TestFlight on every push to `main`. Until it's configured it skips itself and shows a notice. Apple doesn't allow the first three steps to be automated, so do them once:
+
+1. **Choose a bundle ID** you own, e.g. `com.yourname.driftmail`. In the repo, go to **Settings → Secrets and variables → Actions → Variables** and add `BUNDLE_ID`.
+2. **Create an App Store Connect API key:** in [App Store Connect](https://appstoreconnect.apple.com) go to **Users and Access → Integrations → App Store Connect API → Team Keys → +**, with role **Admin** (needed for cloud signing). Download the `.p8`, and note the **Key ID** and **Issuer ID**.
+3. **Create the app record:** in App Store Connect go to **Apps → + → New App**, platform iOS, any name (for example "DriftMail Yourname"), and your bundle ID. If the bundle ID isn't in the list yet, run the TestFlight workflow once. Xcode registers the bundle ID, with push enabled, during the signed build, and then the upload fails until the app record exists. Create the record, then re-run.
+4. **Add repository secrets:** `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY` (the full contents of the `.p8`), and `APPLE_TEAM_ID` (from Membership details).
+5. **Add yourself as a tester:** in the app's **TestFlight** tab, create an internal group with yourself in it and turn on automatic distribution.
+6. Run **Actions → TestFlight** (or just push to `main`). Install **TestFlight** on your iPhone and accept the invite. After that, every push to `main` shows up as an update within about 15 minutes, and TestFlight can install updates automatically.
+
+The workflow uses automatic signing with the API key, so you don't manage certificates or provisioning profiles. `ITSAppUsesNonExemptEncryption` is already `false`, so builds skip the export-compliance question.
 
 ## Project layout
 

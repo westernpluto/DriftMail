@@ -5,9 +5,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        if PushRelay.shared.delivery == .apns {
-            application.registerForRemoteNotifications()
-        }
+        // Succeeds only in builds signed with push (TestFlight / your developer account);
+        // DriftMail then offers native notifications instead of ntfy.
+        application.registerForRemoteNotifications()
         return true
     }
 
@@ -23,8 +23,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         Task { @MainActor in
-            PushRelay.shared.lastSyncSucceeded = false
-            PushRelay.shared.lastMessage = "Native push is unavailable: \(error.localizedDescription). Use the free ntfy option instead."
+            let relay = PushRelay.shared
+            relay.apnsToken = nil
+            if relay.delivery == .apns {
+                relay.lastSyncSucceeded = false
+                relay.lastMessage = "Native push is unavailable in this build: \(error.localizedDescription). Use the free ntfy option instead."
+            }
         }
     }
 

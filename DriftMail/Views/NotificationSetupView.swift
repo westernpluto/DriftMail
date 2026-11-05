@@ -9,6 +9,9 @@ struct NotificationSetupView: View {
     @State private var cloudflareToken = ""
     @State private var copied = false
     @State private var showManual = false
+    @State private var showKeyImporter = false
+    @State private var manualKeyID = ""
+    @State private var keyError: String?
 
     private static let ntfyAppStore = URL(string: "https://apps.apple.com/app/ntfy/id1625396347")!
 
@@ -33,7 +36,9 @@ struct NotificationSetupView: View {
                 connectedSection
             }
 
-            if relay.delivery == .ntfy {
+            if relay.canUseNativePush {
+                nativePushSection
+            } else if relay.delivery == .ntfy {
                 Section {
                     Button {
                         openURL(Self.ntfyAppStore)
@@ -159,6 +164,51 @@ struct NotificationSetupView: View {
         }
         .onChange(of: relay.delivery) { _, delivery in
             if delivery == .apns { UIApplication.shared.registerForRemoteNotifications() }
+        }
+    }
+
+    /// Shown in builds signed with push (TestFlight / your developer account).
+    private var nativePushSection: some View {
+        Section {
+            Link(destination: URL(string: "https://developer.apple.com/account/resources/authkeys/add")!) {
+                Label("Create an Apple Push key", systemImage: "key.horizontal.fill")
+            }
+            Button {
+                showKeyImporter = true
+            } label: {
+                Label(relay.hasAPNsKey ? "Key \(relay.apnsKeyID) added. Replace…" : "Choose the .p8 key file",
+                      systemImage: relay.hasAPNsKey ? "checkmark.circle.fill" : "doc.badge.plus")
+            }
+            if keyError != nil {
+                TextField("Key ID (10 characters)", text: $manualKeyID)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                Text(keyError ?? "").font(.footnote).foregroundStyle(.red)
+            }
+            if relay.hasAPNsKey && relay.isManagedByApp && relay.delivery != .apns {
+                Button {
+                    Task { await relay.enableNativePush() }
+                } label: {
+                    Label("Switch to Native Notifications", systemImage: "bell.badge.fill")
+                }
+                .disabled(relay.isSettingUp)
+            }
+        } header: {
+            Text("1 · Native notifications")
+        } footer: {
+            Text("This build is signed with your Apple Developer account, so DriftMail can show its own notifications. In your developer account, create a key with Apple Push Notifications service enabled, download it to Files, and choose it here. The Team ID and bundle ID are filled in automatically.")
+        }
+        .fileImporter(isPresented: $showKeyImporter, allowedContentTypes: [.item]) { result in
+            guard case .success(let url) = result else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let contents = try String(contentsOf: url, encoding: .utf8)
+                try relay.importAPNsKey(contents: contents, filename: url.lastPathComponent, keyID: manualKeyID)
+                keyError = nil
+            } catch {
+                keyError = error.localizedDescription
+            }
         }
     }
 

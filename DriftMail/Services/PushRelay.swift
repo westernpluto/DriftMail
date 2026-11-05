@@ -117,13 +117,16 @@ final class PushRelay {
         defer { isSettingUp = false; setupProgress = nil }
         do {
             let code = pairingCode.count >= 16 ? pairingCode : Self.randomString(32)
-            let result = try await CloudflareSetup.deploy(token: token, pairingCode: code, encryptionKey: encryptionKey) { step in
+            let useNative = apnsCredentials != nil && apnsToken != nil
+            let result = try await CloudflareSetup.deploy(token: token, pairingCode: code, encryptionKey: encryptionKey,
+                                                          apns: useNative ? apnsCredentials : nil) { step in
                 self.setupProgress = step
             }
             Keychain.set(token, for: "relay.cloudflareToken")
             pairingCode = result.pairingCode
             workerURL = result.url
             UserDefaults.standard.set(CloudflareSetup.bundledScriptHash, forKey: "relay.deployedHash")
+            delivery = useNative ? .apns : .ntfy
             setupProgress = "Connecting your accounts…"
             await sync()
             if lastSyncSucceeded == true {
@@ -142,11 +145,53 @@ final class PushRelay {
               let hash = CloudflareSetup.bundledScriptHash,
               UserDefaults.standard.string(forKey: "relay.deployedHash") != hash else { return }
         do {
-            _ = try await CloudflareSetup.deploy(token: token, pairingCode: pairingCode, encryptionKey: encryptionKey) { _ in }
+            _ = try await CloudflareSetup.deploy(token: token, pairingCode: pairingCode, encryptionKey: encryptionKey,
+                                                 apns: delivery == .apns ? apnsCredentials : nil) { _ in }
             UserDefaults.standard.set(hash, forKey: "relay.deployedHash")
         } catch {
             // Try again next launch.
         }
+    }
+
+    // MARK: Native push (paid Apple Developer account)
+
+    /// This build is signed with push enabled and Apple gave us a device token.
+    var canUseNativePush: Bool { apnsToken != nil }
+
+    var hasAPNsKey: Bool { Keychain.get("relay.apnsKey") != nil }
+    var apnsKeyID: String { Keychain.get("relay.apnsKeyID") ?? "" }
+
+    var apnsCredentials: CloudflareSetup.APNsCredentials? {
+        guard let key = Keychain.get("relay.apnsKey"), let keyID = Keychain.get("relay.apnsKeyID"),
+              let teamID = Keychain.teamID(), let bundleID = Bundle.main.bundleIdentifier else { return nil }
+        return CloudflareSetup.APNsCredentials(key: key, keyID: keyID, teamID: teamID, bundleID: bundleID)
+    }
+
+    /// Saves the Apple Push key picked from Files. The Key ID is read from the
+    /// standard file name (AuthKey_ABC123DEFG.p8) when possible.
+    func importAPNsKey(contents: String, filename: String, keyID manualKeyID: String?) throws {
+        guard contents.contains("BEGIN PRIVATE KEY") else {
+            throw CloudflareSetup.SetupError("That file isn't an Apple Push key (.p8).")
+        }
+        var keyID = manualKeyID?.trimmingCharacters(in: .whitespaces) ?? ""
+        if keyID.isEmpty, let match = filename.firstMatch(of: #/AuthKey_([A-Z0-9]{10})/#) {
+            keyID = String(match.1)
+        }
+        guard keyID.count == 10 else {
+            throw CloudflareSetup.SetupError("Enter the 10-character Key ID shown next to the key in your developer account.")
+        }
+        Keychain.set(contents, for: "relay.apnsKey")
+        Keychain.set(keyID, for: "relay.apnsKeyID")
+    }
+
+    /// Switches an app-managed relay from ntfy to native push without re-entering anything.
+    func enableNativePush() async {
+        guard let token = Keychain.get("relay.cloudflareToken") else {
+            lastSyncSucceeded = false
+            lastMessage = "Paste your Cloudflare token below and tap Set Up first."
+            return
+        }
+        await setUpAutomatically(cloudflareToken: token)
     }
 
     /// Stable key the relay uses to encrypt stored app passwords.
@@ -261,6 +306,7 @@ final class PushRelay {
     func disconnect() async {
         _ = try? await request("/v1/sync", method: "DELETE")
         Keychain.delete("relay.cloudflareToken")
+        delivery = .ntfy
         status = nil
         lastSyncSucceeded = nil
         lastMessage = "Disconnected. Your Worker no longer stores your accounts."

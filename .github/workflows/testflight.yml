@@ -1,0 +1,117 @@
+name: TestFlight
+
+# Builds a signed DriftMail and uploads it to TestFlight on every push to main.
+# Skips itself (green) until these are set, so forks without a paid account are unaffected.
+#
+# Repository secrets:
+#   ASC_KEY_ID       App Store Connect API key ID          (Users and Access → Integrations → App Store Connect API)
+#   ASC_ISSUER_ID    Issuer ID shown on the same page
+#   ASC_KEY          Contents of the AuthKey_XXXX.p8 file   (key role: Admin, needed for cloud signing)
+#   APPLE_TEAM_ID    Your 10-character Team ID             (Membership details)
+# Repository variable (Settings → Secrets and variables → Actions → Variables):
+#   BUNDLE_ID        Your own bundle ID, e.g. com.yourname.driftmail
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  testflight:
+    name: Signed build → TestFlight (Xcode 27.1)
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY: ${{ secrets.ASC_KEY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+    steps:
+      - name: Check configuration
+        id: config
+        run: |
+          missing=""
+          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY APPLE_TEAM_ID BUNDLE_ID; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::notice::TestFlight upload skipped. Missing:$missing (see README → TestFlight)."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.config.outputs.enabled == 'true'
+
+      - name: Prepare
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app/Contents/Developer
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen generate
+          mkdir -p "$HOME/private_keys"
+          printf '%s\n' "$ASC_KEY" > "$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "KEY_PATH=$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8" >> "$GITHUB_ENV"
+          echo "APP_VERSION=1.1.${{ github.run_number }}" >> "$GITHUB_ENV"
+          echo "APP_BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
+
+      - name: Archive (automatic signing)
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          xcodebuild archive \
+            -project DriftMail.xcodeproj \
+            -scheme DriftMail \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/DriftMail.xcarchive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            MARKETING_VERSION="$APP_VERSION" \
+            CURRENT_PROJECT_VERSION="$APP_BUILD" \
+            > archive.log 2>&1 || true
+          grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" archive.log | sort -u || true
+          grep -q "\*\* ARCHIVE SUCCEEDED \*\*" archive.log
+
+      - name: Upload to TestFlight
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          cat > ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>testFlightInternalTestingOnly</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/DriftMail.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath build/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > export.log 2>&1 || true
+          grep -E "error:|Upload succeeded|EXPORT (SUCCEEDED|FAILED)|Progress" export.log | sort -u | tail -20 || true
+          grep -qE "Upload succeeded|EXPORT SUCCEEDED" export.log
+          echo "## Uploaded DriftMail $APP_VERSION ($APP_BUILD) to TestFlight" >> "$GITHUB_STEP_SUMMARY"
+          echo "It appears in the TestFlight app after Apple finishes processing (usually 5–15 minutes)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up key
+        if: always()
+        run: rm -rf "$HOME/private_keys"
