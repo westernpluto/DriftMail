@@ -78,9 +78,11 @@ iOS won't let a free, sideloaded app keep a mail connection open in the backgrou
 
 Open **Settings → Instant Notifications** in DriftMail:
 
-1. **ntfy:** tap **Install ntfy**, then **Copy my topic**. In ntfy, tap **+**, paste the topic and subscribe.
+1. **Choose how you're notified:** **Apple Push** (DriftMail's own private notifications; needs the TestFlight build) or the **ntfy app** (works with any build). Nothing is set up until you choose, and you can switch later; the relay is updated automatically.
+   - **Apple Push:** choose your `.p8` key file (see [Native notifications](#native-notifications-paid-apple-developer-account)).
+   - **ntfy:** tap **Install ntfy**, then **Copy my topic**. In ntfy, tap **+**, paste the topic and subscribe.
 2. **Cloudflare:** tap **Create a free Cloudflare account** if you don't have one. Then tap **Create a DriftMail token**. It opens Cloudflare with the right permissions already filled in. Tap **Continue to summary → Create Token**, copy the token, and paste it into DriftMail.
-3. Tap **Set Up Notifications**.
+3. Tap **Set Up with Apple Push** or **Set Up with ntfy**. The button always names the method it will use.
 
 DriftMail then does the rest:
 - creates the storage and uploads the relay to your Cloudflare account

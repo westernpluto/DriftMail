@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Free instant notifications in three steps:
-/// 1. ntfy app + topic, 2. a Cloudflare token, 3. one tap that deploys the relay
-/// to the person's own Cloudflare account, pairs this phone and sends a test.
+/// Free instant notifications:
+/// 1. choose Apple Push or ntfy, 2. finish that method's one-time step,
+/// 3. a Cloudflare token, 4. one tap that deploys the relay to the person's own
+/// Cloudflare account, pairs this phone and sends a test.
 struct NotificationSetupView: View {
     @Environment(PushRelay.self) private var relay
     @Environment(\.openURL) private var openURL
@@ -36,26 +37,13 @@ struct NotificationSetupView: View {
                 connectedSection
             }
 
-            if relay.canUseNativePush {
-                nativePushSection
-            } else if relay.delivery == .ntfy {
-                Section {
-                    Button {
-                        openURL(Self.ntfyAppStore)
-                    } label: {
-                        Label("Install ntfy (free)", systemImage: "arrow.down.app")
-                    }
-                    Button {
-                        UIPasteboard.general.string = relay.ntfyTopic
-                        copied = true
-                    } label: {
-                        Label(copied ? "Topic copied. Paste it in ntfy." : "Copy my topic",
-                              systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
-                    }
-                } header: {
-                    Text("1 · Get notified with ntfy")
-                } footer: {
-                    Text("In ntfy, tap +, paste the topic and tap Subscribe. Tapping a notification opens DriftMail on that message.")
+            deliveryChoiceSection
+
+            if relay.hasChosenDelivery {
+                if relay.delivery == .apns {
+                    nativePushSection
+                } else {
+                    ntfySection
                 }
             }
 
@@ -77,7 +65,7 @@ struct NotificationSetupView: View {
                     .buttonBorderShape(.capsule)
                 }
             } header: {
-                Text("2 · Connect Cloudflare")
+                Text("3 · Connect Cloudflare")
             } footer: {
                 Text("The token link opens Cloudflare with everything filled in. Scroll down, tap Continue to summary, then Create Token, and copy it. No credit card is needed.")
             }
@@ -87,20 +75,20 @@ struct NotificationSetupView: View {
                     Task { await relay.setUpAutomatically(cloudflareToken: cloudflareToken) }
                 } label: {
                     HStack {
-                        Label(relay.isManagedByApp ? "Set Up Again" : "Set Up Notifications", systemImage: "wand.and.stars")
+                        Label(setupButtonTitle, systemImage: "wand.and.stars")
                             .font(.headline)
                         Spacer()
                         if relay.isSettingUp { ProgressView() }
                     }
                 }
-                .disabled(cloudflareToken.trimmingCharacters(in: .whitespaces).isEmpty || relay.isSettingUp)
+                .disabled(!canStartSetup)
 
                 if let step = relay.setupProgress {
                     Text(step).font(.footnote).foregroundStyle(.secondary)
                 }
                 statusMessage
             } header: {
-                Text("3 · One tap")
+                Text("4 · One tap")
             } footer: {
                 Text("DriftMail creates the relay, pairs it with this phone using a secret code only this phone knows, uploads your accounts and sends a test notification. Updates to the relay are installed automatically.")
             }
@@ -126,11 +114,8 @@ struct NotificationSetupView: View {
 
             Section {
                 DisclosureGroup("Manual setup & advanced", isExpanded: $showManual) {
-                    Picker("Deliver with", selection: $relay.delivery) {
-                        ForEach(PushRelay.Delivery.allCases) { Text($0.title).tag($0) }
-                    }
                     if relay.delivery == .apns {
-                        LabeledContent("Device token", value: relay.apnsToken == nil ? "Not registered" : "Ready")
+                        LabeledContent("Apple Push device token", value: relay.apnsToken == nil ? "Not registered" : "Ready")
                     }
                     TextField("Relay address", text: $relay.workerURL)
                         .keyboardType(.URL)
@@ -155,7 +140,7 @@ struct NotificationSetupView: View {
                     .disabled(!relay.isConfigured || relay.isSyncing)
                 }
             } footer: {
-                Text("Use this if you deployed the relay yourself from GitHub Actions, or for native Apple push with a paid developer account.")
+                Text("Use this if you deployed the relay yourself from GitHub Actions. It uses the delivery method chosen above; for Apple Push, set the relay's APNS_* secrets in the deploy workflow.")
             }
 
             if relay.isConfigured {
@@ -195,18 +180,10 @@ struct NotificationSetupView: View {
                     .autocorrectionDisabled()
                 Text(keyError ?? "").font(.footnote).foregroundStyle(.red)
             }
-            if relay.hasAPNsKey && relay.isManagedByApp && relay.delivery != .apns {
-                Button {
-                    Task { await relay.enableNativePush() }
-                } label: {
-                    Label("Switch to Native Notifications", systemImage: "bell.badge.fill")
-                }
-                .disabled(relay.isSettingUp)
-            }
         } header: {
-            Text("1 · Native notifications")
+            Text("2 · Add your Apple Push key")
         } footer: {
-            Text("This build is signed with your Apple Developer account, so DriftMail can show its own notifications. They're private: the relay only learns that a message arrived, and your phone fetches the sender and subject straight from your provider. In your developer account, create a key with Apple Push Notifications service enabled, download it to Files, and choose it here. The Team ID and bundle ID are filled in automatically.")
+            Text("In your developer account, create a key with Apple Push Notifications service enabled, download it to Files, and choose it here. The Team ID and bundle ID are filled in automatically.")
         }
         .fileImporter(isPresented: $showKeyImporter, allowedContentTypes: [.item]) { result in
             guard case .success(let url) = result else { return }
@@ -216,10 +193,78 @@ struct NotificationSetupView: View {
                 let contents = try String(contentsOf: url, encoding: .utf8)
                 try relay.importAPNsKey(contents: contents, filename: url.lastPathComponent, keyID: manualKeyID)
                 keyError = nil
+                // Finishing a switch to Apple Push on a running relay.
+                if relay.isConfigured && relay.delivery == .apns { Task { await relay.reconfigure() } }
             } catch {
                 keyError = error.localizedDescription
             }
         }
+    }
+
+    // MARK: Choice
+
+    private var deliveryChoiceSection: some View {
+        Section {
+            DeliveryOptionRow(
+                title: "Apple Push",
+                subtitle: "DriftMail's own notifications. Private: your phone fetches the sender and subject itself, so the relay and Apple never see them.",
+                symbol: "apple.logo",
+                badge: relay.canUseNativePush ? "Recommended" : nil,
+                unavailableReason: relay.canUseNativePush ? nil : "Needs the TestFlight build signed with your Apple Developer account.",
+                isSelected: relay.hasChosenDelivery && relay.delivery == .apns
+            ) { relay.choose(.apns) }
+
+            DeliveryOptionRow(
+                title: "ntfy app",
+                subtitle: "Through the free ntfy app. Works with any build, including sideloaded ones. The ntfy server sees sender and subject unless you turn previews off.",
+                symbol: "bell.badge",
+                badge: relay.canUseNativePush ? nil : "Free",
+                unavailableReason: nil,
+                isSelected: relay.hasChosenDelivery && relay.delivery == .ntfy
+            ) { relay.choose(.ntfy) }
+        } header: {
+            Text("1 · How should DriftMail notify you?")
+        } footer: {
+            if relay.isConfigured {
+                Text("Switching updates your relay automatically.")
+            } else {
+                Text("You can switch later at any time.")
+            }
+        }
+    }
+
+    private var ntfySection: some View {
+        Section {
+            Button {
+                openURL(Self.ntfyAppStore)
+            } label: {
+                Label("Install ntfy (free)", systemImage: "arrow.down.app")
+            }
+            Button {
+                UIPasteboard.general.string = relay.ntfyTopic
+                copied = true
+            } label: {
+                Label(copied ? "Topic copied. Paste it in ntfy." : "Copy my topic",
+                      systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
+            }
+        } header: {
+            Text("2 · Subscribe in ntfy")
+        } footer: {
+            Text("In ntfy, tap +, paste the topic and tap Subscribe. Tapping a notification opens DriftMail on that message.")
+        }
+    }
+
+    private var setupButtonTitle: String {
+        guard relay.hasChosenDelivery else { return "Choose a notification method first" }
+        let method = relay.delivery == .apns ? "Apple Push" : "ntfy"
+        return relay.isManagedByApp ? "Set Up Again with \(method)" : "Set Up with \(method)"
+    }
+
+    private var canStartSetup: Bool {
+        guard relay.hasChosenDelivery, !relay.isSettingUp else { return false }
+        if relay.delivery == .apns && (!relay.canUseNativePush || !relay.hasAPNsKey) { return false }
+        let hasToken = !cloudflareToken.trimmingCharacters(in: .whitespaces).isEmpty || relay.isManagedByApp
+        return hasToken
     }
 
     @ViewBuilder
@@ -233,7 +278,7 @@ struct NotificationSetupView: View {
 
     private var connectedSection: some View {
         Section {
-            Label("Notifications are on", systemImage: "checkmark.seal.fill")
+            Label("Notifications are on: \(relay.delivery == .apns ? "Apple Push" : "ntfy")", systemImage: "checkmark.seal.fill")
                 .foregroundStyle(.green)
             if relay.isEndToEndEncrypted {
                 Label("Private: your phone fetches sender and subject itself. The relay and Apple never see them.", systemImage: "lock.fill")
@@ -260,5 +305,55 @@ struct NotificationSetupView: View {
         } header: {
             Text("Status")
         }
+    }
+}
+
+/// One selectable delivery method.
+struct DeliveryOptionRow: View {
+    var title: String
+    var subtitle: String
+    var symbol: String
+    var badge: String?
+    var unavailableReason: String?
+    var isSelected: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.title2)
+                    .frame(width: 32)
+                    .foregroundStyle(unavailableReason == nil ? AnyShapeStyle(Theme.drift) : AnyShapeStyle(.secondary))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(title).font(.headline).foregroundStyle(.primary)
+                        if let badge {
+                            Text(badge)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Theme.accent.opacity(0.15), in: .capsule)
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+                    Text(subtitle).font(.footnote).foregroundStyle(.secondary)
+                    if let unavailableReason {
+                        Label(unavailableReason, systemImage: "info.circle")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.tertiary))
+            }
+            .padding(.vertical, 4)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .disabled(unavailableReason != nil)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

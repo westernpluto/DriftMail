@@ -14,7 +14,7 @@ final class PushRelay {
         case ntfy      // free: the ntfy app shows the notification (no Apple developer account needed)
         case apns      // native DriftMail notifications (needs a paid Apple developer account)
         var id: String { rawValue }
-        var title: String { self == .ntfy ? "ntfy app (free)" : "Native push (Apple Developer)" }
+        var title: String { self == .ntfy ? "ntfy app" : "Apple Push" }
     }
 
     struct Status: Decodable {
@@ -35,6 +35,10 @@ final class PushRelay {
     }
     var delivery: Delivery {
         didSet { UserDefaults.standard.set(delivery.rawValue, forKey: "relay.delivery") }
+    }
+    /// The person has picked Apple Push or ntfy. Nothing is set up until they do.
+    var hasChosenDelivery: Bool {
+        didSet { UserDefaults.standard.set(hasChosenDelivery, forKey: "relay.deliveryChosen") }
     }
     var ntfyServer: String {
         didSet { UserDefaults.standard.set(ntfyServer, forKey: "relay.ntfyServer") }
@@ -79,6 +83,9 @@ final class PushRelay {
         let defaults = UserDefaults.standard
         workerURL = defaults.string(forKey: "relay.url") ?? ""
         delivery = Delivery(rawValue: defaults.string(forKey: "relay.delivery") ?? "") ?? .ntfy
+        // Relays set up before this choice existed keep their current method.
+        hasChosenDelivery = defaults.bool(forKey: "relay.deliveryChosen")
+            || URL(string: defaults.string(forKey: "relay.url") ?? "")?.host != nil
         ntfyServer = defaults.string(forKey: "relay.ntfyServer") ?? "https://ntfy.sh"
         showPreviews = defaults.object(forKey: "relay.previews") as? Bool ?? true
         apnsToken = defaults.string(forKey: "relay.apnsToken")
@@ -109,15 +116,29 @@ final class PushRelay {
     /// Deploys the relay to the person's Cloudflare account, pairs this phone,
     /// uploads the accounts and sends a test notification. One tap.
     func setUpAutomatically(cloudflareToken: String) async {
-        let token = cloudflareToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        var token = cloudflareToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.isEmpty, let stored = Keychain.get("relay.cloudflareToken") { token = stored }
         guard !token.isEmpty else { return }
+        // Use exactly the method the person chose; never fall back silently.
+        let useNative = delivery == .apns
+        if useNative {
+            if apnsToken == nil {
+                lastSyncSucceeded = false
+                lastMessage = "This build can't receive Apple Push. Install the TestFlight build, or choose ntfy."
+                return
+            }
+            if apnsCredentials == nil {
+                lastSyncSucceeded = false
+                lastMessage = "Choose your Apple Push key (.p8) first."
+                return
+            }
+        }
         isSettingUp = true
         lastMessage = nil
         lastSyncSucceeded = nil
         defer { isSettingUp = false; setupProgress = nil }
         do {
             let code = pairingCode.count >= 16 ? pairingCode : Self.randomString(32)
-            let useNative = apnsCredentials != nil && apnsToken != nil
             let result = try await CloudflareSetup.deploy(token: token, pairingCode: code, encryptionKey: encryptionKey,
                                                           apns: useNative ? apnsCredentials : nil) { step in
                 self.setupProgress = step
@@ -126,7 +147,7 @@ final class PushRelay {
             pairingCode = result.pairingCode
             workerURL = result.url
             UserDefaults.standard.set(CloudflareSetup.bundledScriptHash, forKey: "relay.deployedHash")
-            delivery = useNative ? .apns : .ntfy
+            hasChosenDelivery = true
             setupProgress = "Connecting your accounts…"
             await sync()
             if lastSyncSucceeded == true {
@@ -191,14 +212,35 @@ final class PushRelay {
         Keychain.set(keyID, for: "relay.apnsKeyID")
     }
 
-    /// Switches an app-managed relay from ntfy to native push without re-entering anything.
-    func enableNativePush() async {
-        guard let token = Keychain.get("relay.cloudflareToken") else {
+    /// Records the person's choice and, if the relay is already running, switches it over.
+    func choose(_ newDelivery: Delivery) {
+        let changed = delivery != newDelivery || !hasChosenDelivery
+        delivery = newDelivery
+        hasChosenDelivery = true
+        lastMessage = nil
+        lastSyncSucceeded = nil
+        if changed && isConfigured { Task { await reconfigure() } }
+    }
+
+    /// Applies the chosen delivery method to a running relay.
+    func reconfigure() async {
+        guard isConfigured else { return }
+        if delivery == .apns && apnsCredentials == nil {
             lastSyncSucceeded = false
-            lastMessage = "Paste your Cloudflare token below and tap Set Up first."
+            lastMessage = "Choose your Apple Push key (.p8) to finish switching. Until then notifications keep going through ntfy."
             return
         }
-        await setUpAutomatically(cloudflareToken: token)
+        if isManagedByApp {
+            // Redeploys so the relay gets (or drops) the Apple Push key, then re-syncs.
+            await setUpAutomatically(cloudflareToken: "")
+        } else {
+            await sync()
+            if lastSyncSucceeded == true {
+                lastMessage = delivery == .apns
+                    ? "Switched to Apple Push. If you deployed the relay yourself, make sure its APNS_* secrets are set."
+                    : "Switched to ntfy."
+            }
+        }
     }
 
     // MARK: Security
@@ -291,6 +333,11 @@ final class PushRelay {
     /// Sends the account list (with app passwords) and delivery settings to your Worker.
     func sync() async {
         guard isConfigured else { return }
+        if delivery == .apns && isManagedByApp && apnsCredentials == nil {
+            lastSyncSucceeded = false
+            lastMessage = "Choose your Apple Push key (.p8) first."
+            return
+        }
         if delivery == .apns && apnsToken == nil {
             UIApplication.shared.registerForRemoteNotifications()
             lastMessage = "Waiting for Apple to issue a push token. This only works when the app is signed with a paid Apple Developer account."
