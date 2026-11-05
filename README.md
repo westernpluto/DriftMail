@@ -197,8 +197,10 @@ With the TestFlight secrets set (see above), the same workflow also exports **`D
 **Signing by hand with two profiles** (on a Mac): create an ad hoc profile for `<your bundle ID>` (with Push) and one for `<your bundle ID>.NotificationService`, then re-sign the unsigned IPA with fastlane, giving each bundle its own profile:
 
 ```bash
-fastlane run resign ipa:DriftMail.ipa signing_identity:"Apple Distribution: Your Name (TEAMID)" \
-  provisioning_profile:'{"app.driftmail.DriftMail":"app.mobileprovision","app.driftmail.DriftMail.NotificationService":"ext.mobileprovision"}'
+fastlane sigh resign ./DriftMail.ipa \
+  --signing_identity "Apple Distribution: Your Name (TEAMID)" \
+  -p "app.driftmail.DriftMail=./app.mobileprovision" \
+  -p "app.driftmail.DriftMail.NotificationService=./ext.mobileprovision"
 ```
 
 The bundle IDs in the unsigned IPA are `app.driftmail.DriftMail` and `app.driftmail.DriftMail.NotificationService`. If your profiles use different IDs, the workflow route above is simpler, because it builds with your bundle ID from the start.
