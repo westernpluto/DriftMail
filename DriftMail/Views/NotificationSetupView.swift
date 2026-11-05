@@ -34,15 +34,18 @@ struct NotificationSetupView: View {
                 } label: {
                     Label("Open the 5-minute deploy guide", systemImage: "book.pages")
                 }
-                TextField("https://driftmail.you.workers.dev", text: $relay.workerURL)
+                TextField("https://driftmail-relay.you.workers.dev", text: $relay.workerURL)
                     .keyboardType(.URL)
                     .textContentType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                SecureField("Pairing code", text: $relay.pairingCode)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             } header: {
                 Text("1 · Your relay")
             } footer: {
-                Text("Deploy it with one click from GitHub Actions (free Cloudflare account, no credit card), then paste its address here.")
+                Text("Deploy it with one click from GitHub Actions (free Cloudflare account, no credit card), then paste its address and the pairing code you chose. Only a phone with the pairing code can take control of your relay.")
             }
 
             Section {
@@ -107,6 +110,7 @@ struct NotificationSetupView: View {
                     }
                 }
                 .disabled(!relay.isConfigured || relay.isSyncing)
+                .help("Pairs this phone using the pairing code, then uploads your accounts.")
 
                 Button {
                     Task { await relay.sendTest() }
@@ -123,7 +127,7 @@ struct NotificationSetupView: View {
             } header: {
                 Text("4 · Connect")
             } footer: {
-                Text("Your app passwords are sent over HTTPS to your own Worker and stored encrypted there so it can check mail for you. The first phone that connects becomes the relay's owner.")
+                Text("Your app passwords are sent over HTTPS to your own Worker and stored encrypted there so it can check mail for you. Only a phone that knows your pairing code can pair with the relay.")
             }
 
             if let status = relay.status, status.configured {

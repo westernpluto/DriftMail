@@ -107,9 +107,12 @@ async function route(request, env) {
   return json({ error: "Not found" }, 404);
 }
 
-/// The app sends a random token it generated. If ADMIN_TOKEN is set as a secret
-/// it must match; otherwise the first app to connect claims the relay and later
-/// calls must present the same token (stored as a SHA-256 hash).
+/// Every phone sends a random token it generated (kept in its Keychain).
+/// The relay remembers the SHA-256 of its owner's token. A phone becomes the
+/// owner only by also presenting the pairing code, which is a Worker secret
+/// (PAIRING_CODE) that only you know. A guessed or leaked relay address is
+/// therefore useless. The same code lets you re-pair a new or reinstalled phone.
+/// If ADMIN_TOKEN is set it replaces all of this with a fixed shared token.
 async function authorize(request, env, mayClaim) {
   const header = request.headers.get("authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -119,14 +122,21 @@ async function authorize(request, env, mayClaim) {
   }
   const hash = await sha256Hex(token);
   const owner = await env.DRIFT.get(OWNER_KEY);
-  if (!owner) {
-    if (!mayClaim) return { ok: false, error: "This relay has no owner yet. Connect from the app first." };
-    await env.DRIFT.put(OWNER_KEY, hash);
-    return { ok: true };
+  if (owner && timingSafeEqual(owner, hash)) return { ok: true };
+
+  // Not the owner (or no owner yet): pairing requires the secret code.
+  if (!mayClaim) {
+    return { ok: false, error: owner ? "This phone isn't paired with the relay. Enter the pairing code and tap Connect." : "This relay isn't paired yet. Enter the pairing code and tap Connect." };
   }
-  return timingSafeEqual(owner, hash)
-    ? { ok: true }
-    : { ok: false, error: "This relay belongs to another phone. Redeploy it or set ADMIN_TOKEN to reset ownership." };
+  if (!env.PAIRING_CODE) {
+    return { ok: false, error: "The relay has no pairing code. Add the RELAY_PAIRING_CODE secret and run the deploy workflow again." };
+  }
+  const code = (request.headers.get("x-pairing-code") || "").trim();
+  if (!code || !timingSafeEqual(await sha256Hex(code), await sha256Hex(env.PAIRING_CODE))) {
+    return { ok: false, error: "Wrong pairing code." };
+  }
+  await env.DRIFT.put(OWNER_KEY, hash);
+  return { ok: true };
 }
 
 function validateDelivery(d) {

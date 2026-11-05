@@ -1,9 +1,13 @@
 name: Deploy notification relay
 
 # One-click deploy of the free Cloudflare Worker that sends instant
-# new-mail notifications. Needs two repository secrets:
+# new-mail notifications. Needs three repository secrets:
 #   CLOUDFLARE_API_TOKEN   (template "Edit Cloudflare Workers")
 #   CLOUDFLARE_ACCOUNT_ID
+#   RELAY_PAIRING_CODE     (a code you make up; you type it into the app once)
+#
+# Logs of public repos are public, so this workflow never prints the relay
+# address or any IDs. Find the address in the Cloudflare dashboard.
 # Optional secrets for native Apple push (paid developer account only):
 #   APNS_KEY (contents of the .p8 file), APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID
 
@@ -19,6 +23,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RELAY_PAIRING_CODE: ${{ secrets.RELAY_PAIRING_CODE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +31,10 @@ jobs:
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
             echo "::error::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets (see README)."
+            exit 1
+          fi
+          if [ "${#RELAY_PAIRING_CODE}" -lt 8 ]; then
+            echo "::error::Add a RELAY_PAIRING_CODE repository secret of at least 8 characters (see README)."
             exit 1
           fi
 
@@ -49,14 +58,24 @@ jobs:
           }
           ID="$(find_id || true)"
           if [ -z "$ID" ]; then
-            npx wrangler kv namespace create driftmail-kv
+            npx wrangler kv namespace create driftmail-kv > /dev/null
             ID="$(find_id)"
           fi
-          echo "KV namespace: $ID"
+          echo "::add-mask::$ID"
           sed -i "s/REPLACE_WITH_KV_NAMESPACE_ID/$ID/" wrangler.toml
 
       - name: Deploy Worker
-        run: npx wrangler deploy | tee deploy.log
+        # Output is kept out of the public log because it contains the relay address.
+        run: |
+          if npx wrangler deploy > deploy.log 2>&1; then
+            echo "Worker deployed."
+          else
+            grep -iE "error|✘" deploy.log | sed -E 's#https://[^ ]+#<hidden>#g' | head -20
+            exit 1
+          fi
+
+      - name: Store pairing code
+        run: printf '%s' "$RELAY_PAIRING_CODE" | npx wrangler secret put PAIRING_CODE > /dev/null
 
       - name: Store optional secrets
         env:
@@ -69,22 +88,17 @@ jobs:
           for name in APNS_KEY APNS_KEY_ID APNS_TEAM_ID APNS_BUNDLE_ID NTFY_TOKEN; do
             value="${!name}"
             if [ -n "$value" ]; then
-              printf '%s' "$value" | npx wrangler secret put "$name"
+              printf '%s' "$value" | npx wrangler secret put "$name" > /dev/null
             fi
           done
 
-      - name: Show relay address
+      - name: Next steps
         run: |
-          URL="$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1 || true)"
           {
             echo "## DriftMail relay deployed"
             echo
-            if [ -n "$URL" ]; then
-              echo "Paste this address into DriftMail → Settings → Instant Notifications:"
-              echo
-              echo "\`$URL\`"
-            else
-              echo "Find the address in the Cloudflare dashboard under Workers & Pages → driftmail-relay."
-            fi
+            echo "1. Open the Cloudflare dashboard → **Workers & Pages** → **driftmail-relay** and copy its \`workers.dev\` address."
+            echo "2. In DriftMail → Settings → Instant Notifications, paste the address and your pairing code, then tap **Connect**."
+            echo
+            echo "_The address is not printed here because logs of public repositories are visible to everyone._"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "$URL"

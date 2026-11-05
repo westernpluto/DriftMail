@@ -64,6 +64,11 @@ final class PushRelay {
         return fresh
     }
 
+    /// The code you chose when deploying the relay (RELAY_PAIRING_CODE). Only needed to pair.
+    var pairingCode: String = Keychain.get("relay.pairingCode") ?? "" {
+        didSet { Keychain.set(pairingCode, for: "relay.pairingCode") }
+    }
+
     var ntfySubscribeURL: URL? {
         URL(string: "\(ntfyServer.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/\(ntfyTopic)")
     }
@@ -104,6 +109,8 @@ final class PushRelay {
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let code = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !code.isEmpty { request.setValue(code, forHTTPHeaderField: "X-Pairing-Code") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)

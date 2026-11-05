@@ -69,14 +69,21 @@ iOS won't let a free, sideloaded app keep a mail connection open in the backgrou
 
 1. Create a free account at <https://dash.cloudflare.com/sign-up>. Open **Workers & Pages** once so Cloudflare sets up your `*.workers.dev` subdomain.
 2. In Cloudflare, go to **My Profile → API Tokens → Create Token** and choose the **Edit Cloudflare Workers** template. Copy the token. Also copy your **Account ID**, shown on the Workers & Pages overview.
-3. In this GitHub repo, go to **Settings → Secrets and variables → Actions** and add two secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
-4. Go to **Actions → Deploy notification relay → Run workflow**. When it finishes, the run summary shows your relay address, for example `https://driftmail-relay.yourname.workers.dev`.
+3. In your GitHub repo (your own fork if you're not the owner of this one), go to **Settings → Secrets and variables → Actions** and add three **repository secrets**:
+   - `CLOUDFLARE_API_TOKEN`
+   - `CLOUDFLARE_ACCOUNT_ID`
+   - `RELAY_PAIRING_CODE`: a code you make up, at least 8 characters. Longer is better, for example four random words.
+
+   Secrets are encrypted and never shown to anyone, even in a public repo. Never put these values in a file.
+4. Go to **Actions → Deploy notification relay → Run workflow**. Logs of public repos are visible to everyone, so the workflow doesn't print your relay address. Copy it from the Cloudflare dashboard under **Workers & Pages → driftmail-relay**, for example `https://driftmail-relay.yourname.workers.dev`.
 5. In DriftMail, open **Settings → Instant Notifications**:
-   - Paste the relay address.
+   - Paste the relay address and your pairing code.
    - Install **ntfy**, tap **+**, and subscribe to the topic DriftMail shows (use **Copy topic**).
    - Tap **Connect Accounts to Relay**, then **Send Test Notification**.
 
-The first phone that connects becomes the relay's owner. Every later request must carry that phone's random token, which is kept in the Keychain.
+**Who can use the relay.** Only a phone that presents the pairing code can pair with the relay. After that, the relay only answers that phone, which proves itself with a random token kept in its Keychain. Someone who finds the relay address can't do anything with it. Entering the pairing code on a new or reinstalled phone moves the relay to that phone.
+
+**One relay per person.** Each relay serves one owner. If friends want DriftMail notifications, they fork the repo and deploy their own relay in their own free Cloudflare account.
 
 ### Deploy by hand (alternative)
 
@@ -86,6 +93,7 @@ npm install
 npx wrangler login
 npx wrangler kv namespace create driftmail-kv   # paste the id into wrangler.toml
 npx wrangler deploy
+npx wrangler secret put PAIRING_CODE            # the code you'll type into the app
 ```
 
 ### Privacy and security notes
