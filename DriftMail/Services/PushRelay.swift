@@ -91,7 +91,7 @@ final class PushRelay {
         }
     }
 
-    static func randomString(_ length: Int) -> String {
+    nonisolated static func randomString(_ length: Int) -> String {
         let alphabet = Array("abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
         var generator = SystemRandomNumberGenerator()
         return String((0..<length).map { _ in alphabet[Int(generator.next() % UInt64(alphabet.count))] })
