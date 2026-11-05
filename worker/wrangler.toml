@@ -1,0 +1,18 @@
+# DriftMail relay — runs on Cloudflare's free Workers plan.
+name = "driftmail-relay"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+# Check every inbox once a minute.
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "DRIFT"
+# Filled in automatically by the "Deploy relay" GitHub Action,
+# or by you after running: npx wrangler kv namespace create driftmail-kv
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[observability]
+enabled = true

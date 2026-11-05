@@ -1,0 +1,90 @@
+name: Deploy notification relay
+
+# One-click deploy of the free Cloudflare Worker that sends instant
+# new-mail notifications. Needs two repository secrets:
+#   CLOUDFLARE_API_TOKEN   (template "Edit Cloudflare Workers")
+#   CLOUDFLARE_ACCOUNT_ID
+# Optional secrets for native Apple push (paid developer account only):
+#   APNS_KEY (contents of the .p8 file), APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Cloudflare secrets
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets (see README)."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Wrangler
+        run: npm install --no-audit --no-fund
+
+      - name: Create or find the KV namespace
+        run: |
+          set -euo pipefail
+          find_id() {
+            npx wrangler kv namespace list | node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+                const start=s.indexOf("[");const list=JSON.parse(s.slice(start));
+                const hit=list.find(n=>n.title==="driftmail-kv"||n.title.endsWith("-driftmail-kv"));
+                if(hit)console.log(hit.id);
+              });'
+          }
+          ID="$(find_id || true)"
+          if [ -z "$ID" ]; then
+            npx wrangler kv namespace create driftmail-kv
+            ID="$(find_id)"
+          fi
+          echo "KV namespace: $ID"
+          sed -i "s/REPLACE_WITH_KV_NAMESPACE_ID/$ID/" wrangler.toml
+
+      - name: Deploy Worker
+        run: npx wrangler deploy | tee deploy.log
+
+      - name: Store optional secrets
+        env:
+          APNS_KEY: ${{ secrets.APNS_KEY }}
+          APNS_KEY_ID: ${{ secrets.APNS_KEY_ID }}
+          APNS_TEAM_ID: ${{ secrets.APNS_TEAM_ID }}
+          APNS_BUNDLE_ID: ${{ secrets.APNS_BUNDLE_ID }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+        run: |
+          for name in APNS_KEY APNS_KEY_ID APNS_TEAM_ID APNS_BUNDLE_ID NTFY_TOKEN; do
+            value="${!name}"
+            if [ -n "$value" ]; then
+              printf '%s' "$value" | npx wrangler secret put "$name"
+            fi
+          done
+
+      - name: Show relay address
+        run: |
+          URL="$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1 || true)"
+          {
+            echo "## DriftMail relay deployed"
+            echo
+            if [ -n "$URL" ]; then
+              echo "Paste this address into DriftMail → Settings → Instant Notifications:"
+              echo
+              echo "\`$URL\`"
+            else
+              echo "Find the address in the Cloudflare dashboard under Workers & Pages → driftmail-relay."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL"

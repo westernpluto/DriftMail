@@ -1,0 +1,77 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build unsigned IPA (Xcode 27.1)
+    # GitHub's Xcode 27 image (macOS 27). Xcode 27.1 is installed at /Applications/Xcode_27.1.app.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 27.1
+        run: |
+          if [ ! -d /Applications/Xcode_27.1.app ]; then
+            echo "::error::Xcode 27.1 was not found on this runner. Installed versions:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s /Applications/Xcode_27.1.app/Contents/Developer
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DriftMail.xcodeproj \
+            -scheme DriftMail \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log | grep -E "error:|warning: .*(deprecated|unavailable)|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/DriftMail.app
+
+      - name: Show compiler errors
+        if: failure()
+        run: grep -E "error:" -A3 xcodebuild.log | head -200 || true
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/DriftMail.app Payload/
+          zip -qry DriftMail.ipa Payload
+          ls -lh DriftMail.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriftMail-ipa
+          path: DriftMail.ipa
+          if-no-files-found: error
+
+      - name: Attach IPA to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DriftMail.ipa

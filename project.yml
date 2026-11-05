@@ -1,0 +1,36 @@
+name: DriftMail
+options:
+  bundleIdPrefix: app.driftmail
+  deploymentTarget:
+    iOS: "27.1"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+targets:
+  DriftMail:
+    type: application
+    platform: iOS
+    sources:
+      - path: DriftMail
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.driftmail.DriftMail
+        PRODUCT_NAME: DriftMail
+        INFOPLIST_FILE: DriftMail/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: DriftMail/DriftMail.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_STRICT_CONCURRENCY: minimal
+        ENABLE_PREVIEWS: YES
+        SUPPORTS_MACCATALYST: NO
+        IPHONEOS_DEPLOYMENT_TARGET: "27.1"
+    scheme:
+      testTargets: []
