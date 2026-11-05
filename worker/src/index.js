@@ -546,8 +546,7 @@ async function deliver(env, config, message) {
         ...reference,
       };
     }
-    const host = d.environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
-    const response = await fetch(`https://${host}/3/device/${d.token}`, {
+    const send = (environment) => fetch(`https://${environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com"}/3/device/${d.token}`, {
       method: "POST",
       headers: {
         authorization: `bearer ${jwt}`,
@@ -558,6 +557,23 @@ async function deliver(env, config, message) {
       },
       body: JSON.stringify(payload),
     });
+    let response = await send(d.environment);
+    if (response.status === 400) {
+      const text = await response.text();
+      if (!/BadDeviceToken/.test(text)) throw new Error(`APNs answered 400: ${text}`);
+      // The phone may not know which push environment it was signed for (re-signed
+      // builds often lack embedded.mobileprovision, so it guesses "production"
+      // even with a development certificate). Try the other environment and
+      // remember whichever one Apple accepts.
+      const other = d.environment === "development" ? "production" : "development";
+      response = await send(other);
+      if (response.ok) {
+        d.environment = other;
+        await env.DRIFT.put(CONFIG_KEY, JSON.stringify(config));
+        return;
+      }
+      throw new Error(`APNs rejected the device token in both environments (${response.status}: ${await response.text()}). Check that the Apple Push key and the signing profile belong to the same team.`);
+    }
     if (!response.ok) throw new Error(`APNs answered ${response.status}: ${await response.text()}`);
   }
 }
