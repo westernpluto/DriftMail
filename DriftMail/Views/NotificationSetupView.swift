@@ -106,6 +106,16 @@ struct NotificationSetupView: View {
             }
 
             Section {
+                NavigationLink {
+                    RelaySecurityView()
+                } label: {
+                    Label("Security", systemImage: "lock.shield")
+                }
+            } footer: {
+                Text("Separate relay passwords, the stored Cloudflare token, and recommended settings.")
+            }
+
+            Section {
                 Toggle("Show sender and subject", isOn: $relay.showPreviews)
                     .onChange(of: relay.showPreviews) { _, _ in Task { await relay.syncIfConfigured() } }
             } header: {

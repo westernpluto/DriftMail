@@ -101,7 +101,8 @@ enum CloudflareSetup {
             "main_module": "index.js",
             "compatibility_date": compatibilityDate,
             "bindings": bindings,
-            "observability": ["enabled": true],
+            // Logs off: nothing from your mail servers is kept in Cloudflare's log storage.
+            "observability": ["enabled": false],
         ]
         _ = try await api.upload("/accounts/\(accountID)/workers/scripts/\(scriptName)", metadata: metadata, script: script)
 

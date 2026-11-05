@@ -18,7 +18,10 @@ const OWNER_KEY = "owner";
 const STATUS_KEY = "status";
 const APNS_JWT_KEY = "apns-jwt";
 const MAX_NOTIFICATIONS_PER_ACCOUNT = 5;
-const DEFAULT_IDLE_SECONDS = 50;   // stay connected this long per one-minute run
+const DEFAULT_IDLE_SECONDS = 50;
+const PAIR_FAILS_KEY = "pair-fails";
+const MAX_PAIR_FAILS = 10;                 // wrong pairing codes allowed…
+const PAIR_LOCKOUT_MS = 60 * 60 * 1000;    // …per hour before pairing locks   // stay connected this long per one-minute run
 
 export default {
   async fetch(request, env, ctx) {
@@ -50,7 +53,7 @@ async function route(request, env) {
   if (!env.DRIFT) return json({ error: "KV namespace binding DRIFT is missing." }, 500);
 
   const auth = await authorize(request, env, url.pathname === "/v1/sync" && request.method === "POST");
-  if (!auth.ok) return json({ error: auth.error }, 401);
+  if (!auth.ok) return json({ error: auth.error }, auth.status || 401);
 
   if (url.pathname === "/v1/sync" && request.method === "POST") {
     const body = await request.json();
@@ -146,10 +149,22 @@ async function authorize(request, env, mayClaim) {
   if (!env.PAIRING_CODE) {
     return { ok: false, error: "The relay has no pairing code. Add the RELAY_PAIRING_CODE secret and run the deploy workflow again." };
   }
+  // Brute-force protection: after 10 wrong codes in an hour, pairing locks for the
+  // rest of that hour. While locked nothing is written, so KV writes stay bounded.
+  const now = Date.now();
+  let fails = (await env.DRIFT.get(PAIR_FAILS_KEY, "json")) || { count: 0, since: now };
+  if (now - fails.since > PAIR_LOCKOUT_MS) fails = { count: 0, since: now };
+  if (fails.count >= MAX_PAIR_FAILS) {
+    const minutes = Math.ceil((fails.since + PAIR_LOCKOUT_MS - now) / 60000);
+    return { ok: false, status: 429, error: `Too many wrong pairing codes. Pairing is locked for ${minutes} more minute${minutes === 1 ? "" : "s"}.` };
+  }
   const code = (request.headers.get("x-pairing-code") || "").trim();
   if (!code || !timingSafeEqual(await sha256Hex(code), await sha256Hex(env.PAIRING_CODE))) {
+    fails.count += 1;
+    await env.DRIFT.put(PAIR_FAILS_KEY, JSON.stringify(fails));
     return { ok: false, error: "Wrong pairing code." };
   }
+  if (fails.count) await env.DRIFT.delete(PAIR_FAILS_KEY);
   await env.DRIFT.put(OWNER_KEY, hash);
   return { ok: true };
 }

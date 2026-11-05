@@ -177,6 +177,7 @@ final class MailStore {
         Keychain.deletePassword(for: account)
         accounts.removeAll { $0.id == account.id }
         SharedAccounts.remove(account.id)
+        Keychain.delete("relaypw.\(account.id.uuidString)")
         shareAccountsWithExtension()
         mailboxes[account.id] = nil
         messagesByMailbox = messagesByMailbox.filter { !$0.key.hasPrefix(account.id.uuidString) }

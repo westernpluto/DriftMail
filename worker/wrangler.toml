@@ -14,5 +14,6 @@ binding = "DRIFT"
 # or by you after running: npx wrangler kv namespace create driftmail-kv
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
+# Request logs are off so nothing from your mail servers is kept in Cloudflare's logs.
 [observability]
-enabled = true
+enabled = false

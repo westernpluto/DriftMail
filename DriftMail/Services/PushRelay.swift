@@ -201,6 +201,45 @@ final class PushRelay {
         await setUpAutomatically(cloudflareToken: token)
     }
 
+    // MARK: Security
+
+    private func relayPasswordKey(_ account: MailAccount) -> String { "relaypw.\(account.id.uuidString)" }
+
+    /// A separate app password used only by the relay (recommended).
+    func relayPassword(for account: MailAccount) -> String? { Keychain.get(relayPasswordKey(account)) }
+
+    func hasSeparatePassword(_ account: MailAccount) -> Bool { relayPassword(for: account) != nil }
+
+    /// Checks the password signs in, saves it, and sends it to the relay in place of the phone's.
+    func setRelayPassword(_ password: String, for account: MailAccount) async throws {
+        var clean = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        if account.providerID == MailProvider.gmail.id { clean = clean.replacingOccurrences(of: " ", with: "") }
+        if clean == Keychain.password(for: account) {
+            throw CloudflareSetup.SetupError("That's the same password the phone uses. Create a new app password just for the relay.")
+        }
+        try await AccountSession.verify(account: account, password: clean)
+        Keychain.set(clean, for: relayPasswordKey(account))
+        await syncIfConfigured()
+    }
+
+    func clearRelayPassword(for account: MailAccount) async {
+        Keychain.delete(relayPasswordKey(account))
+        await syncIfConfigured()
+    }
+
+    /// Stops storing the Cloudflare token on this phone. The relay keeps working;
+    /// it just won't update automatically until a token is pasted again.
+    func forgetCloudflareToken() {
+        Keychain.delete("relay.cloudflareToken")
+    }
+
+    /// A newer relay is bundled with the app but there's no token to install it with.
+    var relayUpdateAvailable: Bool {
+        guard isConfigured, !isManagedByApp,
+              let deployed = UserDefaults.standard.string(forKey: "relay.deployedHash") else { return false }
+        return deployed != CloudflareSetup.bundledScriptHash
+    }
+
     /// Stable key the relay uses to encrypt stored app passwords.
     private var encryptionKey: String {
         if let existing = Keychain.get("relay.encKey") { return existing }
@@ -261,7 +300,8 @@ final class PushRelay {
         isSyncing = true
         defer { isSyncing = false }
         let accounts: [[String: Any]] = MailStore.shared.accounts.compactMap { account in
-            guard let password = Keychain.password(for: account) else { return nil }
+            // Prefer the relay's own app password, so it can be revoked without affecting the phone.
+            guard let password = relayPassword(for: account) ?? Keychain.password(for: account) else { return nil }
             return [
                 "id": account.id.uuidString,
                 "email": account.email,

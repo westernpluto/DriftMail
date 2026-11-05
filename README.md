@@ -116,6 +116,14 @@ npx wrangler secret put PAIRING_CODE            # the code you'll type into the 
 
 ### Privacy and security notes
 
+**Hardening checklist.** DriftMail → Instant Notifications → **Security** has all of these:
+
+- **Give the relay its own app password** for each account. If your relay or Cloudflare account were ever compromised, you'd revoke only that password. Your phone keeps working, and your provider shows when the relay's password was last used. DriftMail checks the password before using it, and refuses to reuse the phone's.
+- **Add a passkey or two-factor authentication to your Cloudflare account.** Control of that account is the realistic way someone could reach your relay.
+- **Forget the Cloudflare token** if you'd rather the phone not store it. Notifications keep working; you paste a token again only to install relay updates. The app tells you when one is available.
+- **Hide notification previews when locked** (iPhone Settings → Notifications → Show Previews → When Unlocked).
+- Built in: the relay **locks pairing for an hour after 10 wrong codes**, and keeps **no request logs** in Cloudflare.
+
 - To check mail for you, the relay stores your app passwords in **your own** Cloudflare KV, encrypted with AES-GCM. With in-app setup, the encryption key is a Worker secret that DriftMail generates and keeps in your Keychain. With manual setup, add `ENC_KEY` as a secret yourself (`npx wrangler secret put ENC_KEY`); otherwise the Worker generates a key and stores it in KV.
 - App passwords can be revoked at any time and can't be used to sign in to your account's settings.
 - Turn off **Show sender and subject** if you'd rather not have message details pass through ntfy.sh. You can also self-host ntfy and change the server under **Advanced**. Set an `NTFY_TOKEN` secret if your server requires auth.
