@@ -64,6 +64,20 @@ jobs:
         if: failure()
         run: grep -E "error:" -A3 xcodebuild.log | head -200 || true
 
+      # The IPA is unsigned, but re-signers such as Feather read the entitlements a
+      # binary asks for. Ad hoc sign with DriftMail's entitlements (placeholder team
+      # AAAAAAAAAA, which signers replace with yours) so the shared keychain group
+      # used by private notifications survives re-signing.
+      - name: Embed intended entitlements
+        run: |
+          APP=build/Build/Products/Release-iphoneos/DriftMail.app
+          EXT="$APP/PlugIns/NotificationService.appex"
+          sed 's/$(AppIdentifierPrefix)/AAAAAAAAAA./g' DriftMail/DriftMail.entitlements > app.entitlements
+          sed 's/$(AppIdentifierPrefix)/AAAAAAAAAA./g' NotificationService/NotificationService.entitlements > ext.entitlements
+          codesign --force --sign - --timestamp=none --entitlements ext.entitlements "$EXT"
+          codesign --force --sign - --timestamp=none --entitlements app.entitlements "$APP"
+          codesign -d --entitlements - --xml "$APP" | plutil -p - | head -20
+
       - name: Package IPA
         run: |
           mkdir -p Payload
