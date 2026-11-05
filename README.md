@@ -185,6 +185,24 @@ With ntfy, turning off **Show sender and subject** puts the relay in the same no
 
 The workflow uses automatic signing with the API key, so you don't manage certificates or provisioning profiles. `ITSAppUsesNonExemptEncryption` is already `false`, so builds skip the export-compliance question.
 
+## Ad hoc IPA (signed with separate profiles, no re-signing)
+
+With the TestFlight secrets set (see above), the same workflow also exports **`DriftMail-adhoc-<version>.ipa`** as a run artifact (**Actions → TestFlight → latest run → Artifacts**). Automatic signing gives the app and its notification extension their own ad hoc profiles, so push, private notifications and the shared keychain are all set up correctly. The run log lists the profile used for each part.
+
+- It installs only on devices registered in your developer account. Register your iPhone under **Certificates, Identifiers & Profiles → Devices → +** with its UDID, then re-run the workflow.
+- Install it **as-is, without re-signing**: on a Mac, connect the iPhone and drag the IPA onto it in Finder, or use Apple Configurator. Re-signing it with a single-profile tool would undo the point.
+- Signatures last as long as the profile (up to a year).
+- Only want this and not TestFlight? Set the repository variable `SKIP_TESTFLIGHT` to `true`. You then don't need the App Store Connect app record either.
+
+**Signing by hand with two profiles** (on a Mac): create an ad hoc profile for `<your bundle ID>` (with Push) and one for `<your bundle ID>.NotificationService`, then re-sign the unsigned IPA with fastlane, giving each bundle its own profile:
+
+```bash
+fastlane run resign ipa:DriftMail.ipa signing_identity:"Apple Distribution: Your Name (TEAMID)" \
+  provisioning_profile:'{"app.driftmail.DriftMail":"app.mobileprovision","app.driftmail.DriftMail.NotificationService":"ext.mobileprovision"}'
+```
+
+The bundle IDs in the unsigned IPA are `app.driftmail.DriftMail` and `app.driftmail.DriftMail.NotificationService`. If your profiles use different IDs, the workflow route above is simpler, because it builds with your bundle ID from the start.
+
 ## Project layout
 
 ```

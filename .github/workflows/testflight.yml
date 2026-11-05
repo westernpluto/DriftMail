@@ -1,6 +1,9 @@
 name: TestFlight
 
-# Builds a signed DriftMail and uploads it to TestFlight on every push to main.
+# Builds a signed DriftMail on every push to main and
+#   1. exports an ad hoc IPA (app + extension each with their own profile) for
+#      direct installs on devices registered in your account, and
+#   2. uploads it to TestFlight (set the variable SKIP_TESTFLIGHT=true to skip).
 # Skips itself (green) until these are set, so forks without a paid account are unaffected.
 #
 # Repository secrets:
@@ -80,8 +83,58 @@ jobs:
           grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" archive.log | sort -u || true
           grep -q "\*\* ARCHIVE SUCCEEDED \*\*" archive.log
 
-      - name: Upload to TestFlight
+      # Automatic signing creates a separate ad hoc profile for the app and for its
+      # notification extension, so both are signed correctly. Installs on devices
+      # registered under Devices in your developer account.
+      - name: Export ad hoc IPA
+        id: adhoc
         if: steps.config.outputs.enabled == 'true'
+        continue-on-error: true
+        run: |
+          cat > ExportOptions-adhoc.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>release-testing</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>compileBitcode</key><false/>
+            <key>thinning</key><string>&lt;none&gt;</string>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/DriftMail.xcarchive \
+            -exportOptionsPlist ExportOptions-adhoc.plist \
+            -exportPath build/adhoc \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > adhoc.log 2>&1 || true
+          grep -E "error:|EXPORT (SUCCEEDED|FAILED)" adhoc.log | sort -u || true
+          if ! grep -q "EXPORT SUCCEEDED" adhoc.log; then
+            echo "::warning::Ad hoc export failed. It needs at least one device registered in your developer account (Devices → +, with your iPhone's UDID)."
+            exit 1
+          fi
+          mv build/adhoc/*.ipa "DriftMail-adhoc-${APP_VERSION}.ipa"
+          echo "Signed pieces:"
+          unzip -o -q "DriftMail-adhoc-${APP_VERSION}.ipa" -d adhoc-check
+          for bundle in adhoc-check/Payload/*.app adhoc-check/Payload/*.app/PlugIns/*.appex; do
+            echo "  $(basename "$bundle"): $(security cms -D -i "$bundle/embedded.mobileprovision" 2>/dev/null | plutil -extract Name raw -o - - 2>/dev/null)"
+          done
+
+      - name: Upload ad hoc IPA
+        if: steps.adhoc.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriftMail-adhoc-ipa
+          path: DriftMail-adhoc-*.ipa
+          retention-days: 30
+
+      - name: Upload to TestFlight
+        if: steps.config.outputs.enabled == 'true' && vars.SKIP_TESTFLIGHT != 'true'
         run: |
           cat > ExportOptions.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
