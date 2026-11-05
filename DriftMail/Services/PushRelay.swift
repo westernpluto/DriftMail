@@ -158,6 +158,11 @@ final class PushRelay {
     /// This build is signed with push enabled and Apple gave us a device token.
     var canUseNativePush: Bool { apnsToken != nil }
 
+    /// Native notifications are encrypted so only this phone can read them.
+    var isEndToEndEncrypted: Bool {
+        delivery == .apns && SharedSecrets.notificationKey(createIfMissing: false) != nil
+    }
+
     var hasAPNsKey: Bool { Keychain.get("relay.apnsKey") != nil }
     var apnsKeyID: String { Keychain.get("relay.apnsKeyID") ?? "" }
 
@@ -265,11 +270,16 @@ final class PushRelay {
             ]
         }
         do {
-            _ = try await request("/v1/sync", method: "POST", body: [
+            var body: [String: Any] = [
                 "delivery": deliveryPayload(),
                 "showPreviews": showPreviews,
                 "accounts": accounts,
-            ])
+            ]
+            // Native notifications are end-to-end encrypted with a key made on this phone.
+            if delivery == .apns, let key = SharedSecrets.notificationKey(createIfMissing: true) {
+                body["e2eKey"] = key.base64EncodedString()
+            }
+            _ = try await request("/v1/sync", method: "POST", body: body)
             lastSyncSucceeded = true
             lastMessage = "Connected. Your Worker now watches \(accounts.count) inbox\(accounts.count == 1 ? "" : "es") live."
             await refreshStatus()

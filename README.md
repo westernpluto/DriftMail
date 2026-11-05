@@ -131,6 +131,14 @@ In a TestFlight build (or any build signed with your team), DriftMail detects th
 
 The relay stores the key as an encrypted Worker secret and signs Apple Push requests with it. ntfy remains available under **Manual setup & advanced**.
 
+**End-to-end encrypted.** Native notifications are encrypted so that Apple, and anyone else between your relay and your phone, can't read them:
+
+- DriftMail creates a random 256-bit key on your phone. It's stored in a keychain group shared only with DriftMail's notification extension. A copy goes to your own relay, where it's stored encrypted.
+- For each new email, the relay encrypts the sender, subject and message reference with AES-256-GCM. Apple's servers only see a placeholder alert ("DriftMail: New mail") plus ciphertext.
+- On your phone, DriftMail's Notification Service Extension decrypts the real sender and subject before the notification appears. If decryption ever fails, you still see "New mail", and tapping still works.
+
+Your relay itself does see sender and subject, because it reads them from your mailbox to build the notification. It runs in your own Cloudflare account. This is the same trust model as any server that checks mail for you.
+
 ### Free-plan budget
 
 | Resource | Free limit | DriftMail uses |
@@ -163,6 +171,8 @@ DriftMail/
   Mail/       IMAP client and parser, SMTP client, MIME parser and builder
   Services/   MailStore (state), account sessions, Keychain, relay client
   Views/      SwiftUI screens (split view, list, message, compose, setup)
+NotificationService/  Extension that decrypts end-to-end encrypted notifications
+Shared/       Code shared by the app and the extension (keychain group secrets)
 worker/       Cloudflare Worker relay (no dependencies)
 project.yml   XcodeGen project spec
 ```

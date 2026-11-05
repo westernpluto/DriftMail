@@ -69,7 +69,14 @@ async function route(request, env) {
         password: await encrypt(env, String(a.password)),
       });
     }
-    const config = { delivery, showPreviews: body.showPreviews !== false, accounts: stored, updated: new Date().toISOString() };
+    // End-to-end encryption key for native notifications (generated on the phone).
+    let e2eKey = null;
+    if (body.e2eKey) {
+      const raw = fromB64(String(body.e2eKey));
+      if (raw.length !== 32) return json({ error: "Invalid notification key." }, 400);
+      e2eKey = await encrypt(env, String(body.e2eKey));
+    }
+    const config = { delivery, showPreviews: body.showPreviews !== false, accounts: stored, e2eKey, updated: new Date().toISOString() };
     await env.DRIFT.put(CONFIG_KEY, JSON.stringify(config));
     // Take a baseline right away so existing mail never triggers notifications.
     const state = await checkAll(env, { baselineOnly: true });
@@ -489,6 +496,22 @@ async function deliver(env, config, message) {
 
   if (d.type === "apns") {
     const jwt = await apnsJWT(env);
+    const reference = { account: message.accountId, uid: message.uid, mailbox: "INBOX" };
+    let payload;
+    if (config.e2eKey) {
+      // End-to-end encrypted: Apple only sees a placeholder and ciphertext.
+      // DriftMail's notification extension decrypts it on the phone.
+      const sealed = await sealForPhone(env, config.e2eKey, { title, body, ...reference });
+      payload = {
+        aps: { alert: { title: "DriftMail", body: "New mail" }, sound: "default", "mutable-content": 1, "thread-id": "driftmail", category: "NEW_MAIL" },
+        enc: sealed,
+      };
+    } else {
+      payload = {
+        aps: { alert: { title, body }, sound: "default", "thread-id": message.accountId || "driftmail", category: "NEW_MAIL" },
+        ...reference,
+      };
+    }
     const host = d.environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
     const response = await fetch(`https://${host}/3/device/${d.token}`, {
       method: "POST",
@@ -499,15 +522,25 @@ async function deliver(env, config, message) {
         "apns-priority": "10",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        aps: { alert: { title, body }, sound: "default", "thread-id": message.accountId || "driftmail", category: "NEW_MAIL" },
-        account: message.accountId,
-        uid: message.uid,
-        mailbox: "INBOX",
-      }),
+      body: JSON.stringify(payload),
     });
     if (!response.ok) throw new Error(`APNs answered ${response.status}: ${await response.text()}`);
   }
+}
+
+/// AES-256-GCM with the phone's key. Output: base64(nonce | ciphertext | tag),
+/// which is exactly CryptoKit's AES.GCM.SealedBox "combined" format.
+async function sealForPhone(env, storedKey, object) {
+  const raw = fromB64(await decrypt(env, storedKey));
+  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(object))));
+  const combined = new Uint8Array(iv.length + data.length);
+  combined.set(iv);
+  combined.set(data, iv.length);
+  let bin = "";
+  for (const b of combined) bin += String.fromCharCode(b);
+  return btoa(bin);
 }
 
 /// Apple wants a provider token refreshed at most every 20 minutes; cache it for 45.
@@ -567,6 +600,10 @@ function b64url(input) {
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromB64(s) {
+  try { return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); } catch { return new Uint8Array(0); }
 }
 
 function fromB64url(s) {

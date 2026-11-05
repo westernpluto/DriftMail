@@ -31,6 +31,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>DriftKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)app.driftmail.shared</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
