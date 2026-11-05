@@ -46,6 +46,11 @@ final class PushRelay {
     var ntfyTopic: String {
         didSet { UserDefaults.standard.set(ntfyTopic, forKey: "relay.ntfyTopic") }
     }
+    /// Apple Push only: the phone fetches sender and subject itself (needs the
+    /// notification extension). Off: the relay includes them, like ntfy.
+    var privateNotifications: Bool {
+        didSet { UserDefaults.standard.set(privateNotifications, forKey: "relay.private") }
+    }
     var showPreviews: Bool {
         didSet { UserDefaults.standard.set(showPreviews, forKey: "relay.previews") }
     }
@@ -88,6 +93,7 @@ final class PushRelay {
             || URL(string: defaults.string(forKey: "relay.url") ?? "")?.host != nil
         ntfyServer = defaults.string(forKey: "relay.ntfyServer") ?? "https://ntfy.sh"
         showPreviews = defaults.object(forKey: "relay.previews") as? Bool ?? true
+        privateNotifications = defaults.object(forKey: "relay.private") as? Bool ?? true
         apnsToken = defaults.string(forKey: "relay.apnsToken")
         if let topic = defaults.string(forKey: "relay.ntfyTopic") {
             ntfyTopic = topic
@@ -183,7 +189,7 @@ final class PushRelay {
 
     /// Native notifications are encrypted so only this phone can read them.
     var isEndToEndEncrypted: Bool {
-        delivery == .apns && SharedSecrets.notificationKey(createIfMissing: false) != nil
+        delivery == .apns && privateNotifications && SharedSecrets.notificationKey(createIfMissing: false) != nil
     }
 
     var hasAPNsKey: Bool { Keychain.get("relay.apnsKey") != nil }
@@ -363,7 +369,7 @@ final class PushRelay {
                 "accounts": accounts,
             ]
             // Native notifications are end-to-end encrypted with a key made on this phone.
-            if delivery == .apns, let key = SharedSecrets.notificationKey(createIfMissing: true) {
+            if delivery == .apns, privateNotifications, let key = SharedSecrets.notificationKey(createIfMissing: true) {
                 body["e2eKey"] = key.base64EncodedString()
             }
             _ = try await request("/v1/sync", method: "POST", body: body)

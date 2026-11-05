@@ -180,6 +180,14 @@ struct NotificationSetupView: View {
                     .autocorrectionDisabled()
                 Text(keyError ?? "").font(.footnote).foregroundStyle(.red)
             }
+            Toggle("Private notifications", isOn: Binding(
+                get: { relay.privateNotifications },
+                set: { relay.privateNotifications = $0; Task { await relay.syncIfConfigured() } }))
+            Text(relay.privateNotifications
+                 ? "Your phone fetches sender and subject itself; the relay and Apple never see them. If Send Test Notification shows only \u{201C}New mail\u{201D}, your signing tool didn't set up DriftMail's notification extension: turn this off."
+                 : "The relay includes sender and subject in the notification (Apple sees them in transit). Use this if your signing tool doesn't support DriftMail's notification extension.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         } header: {
             Text("2 · Add your Apple Push key")
         } footer: {

@@ -58,47 +58,52 @@ enum SharedSecrets {
         return environment == "development" ? "development" : "production"
     }
 
-    static func get(_ account: String) -> Data? {
-        guard let group = accessGroup else { return nil }
-        let query: [String: Any] = [
+    private static func query(_ account: String, group: String?) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: group,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
+        if let group { query[kSecAttrAccessGroup as String] = group }
+        return query
     }
 
+    /// Reads from the shared group, or from any group this binary can access (which
+    /// covers signers that give both binaries the profile's wildcard "TEAMID.*" group).
+    static func get(_ account: String) -> Data? {
+        for group in [accessGroup, nil] {
+            if group == nil && accessGroup == nil && signingTeamID == nil { break }
+            var q = query(account, group: group)
+            q[kSecReturnData as String] = true
+            q[kSecMatchLimit as String] = kSecMatchLimitOne
+            var result: AnyObject?
+            if SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess, let data = result as? Data {
+                return data
+            }
+        }
+        return nil
+    }
+
+    /// Writes to the shared group. If the signature doesn't grant that exact group
+    /// (some on-device signers apply only the profile's wildcard), falls back to the
+    /// default group, which the app and extension then have in common.
     @discardableResult
     static func set(_ data: Data, for account: String) -> Bool {
-        guard let group = accessGroup else { return false }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: group,
-        ]
-        SecItemDelete(query as CFDictionary)
-        var attributes = query
-        attributes[kSecValueData as String] = data
-        // Notifications can arrive while the phone is locked.
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
+        guard accessGroup != nil || signingTeamID != nil else { return false }
+        delete(account)
+        for group in [accessGroup, nil] {
+            var attributes = query(account, group: group)
+            attributes[kSecValueData as String] = data
+            // Notifications can arrive while the phone is locked.
+            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            if SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess { return true }
+        }
+        return false
     }
 
     static func delete(_ account: String) {
-        guard let group = accessGroup else { return }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: group,
-        ]
-        SecItemDelete(query as CFDictionary)
+        if let group = accessGroup { SecItemDelete(query(account, group: group) as CFDictionary) }
+        SecItemDelete(query(account, group: nil) as CFDictionary)
     }
 
     /// The 256-bit AES-GCM key that notification contents are encrypted with.

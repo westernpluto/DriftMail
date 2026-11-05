@@ -138,6 +138,8 @@ Apple Push works in any DriftMail build signed with a **paid** developer account
 - **TestFlight** (recommended): automatic updates, everything handled by the workflow.
 - **Sideloaded with your paid account**, e.g. Sideloadly signed in with your developer Apple ID: signatures last a year instead of 7 days. Whether push survives depends on the tool keeping the `aps-environment` entitlement and enabling Push on the App ID it creates. DriftMail tells you: **Apple Push** only becomes selectable when the phone actually received a push token.
 
+**Sideloading tools and the notification extension.** Private notifications need DriftMail's notification extension (`PlugIns/NotificationService.appex`) to be signed too. Some on-device signers, such as Feather (built on Zsign), sign with a single profile. They may not set the extension up correctly, so their documentation doesn't settle it. To check, tap **Send Test Notification**: "DriftMail is connected" means the extension works. If you see "New mail" instead, turn off **Private notifications** under Apple Push, and the relay includes sender and subject itself. DriftMail also falls back to the profile's default keychain group when a signer applies only the `TEAMID.*` wildcard.
+
 DriftMail picks Apple's sandbox or production push servers from the build's own provisioning profile, and its Team ID from the signature, so all of these work without changes. Free Apple IDs can't receive Apple Push; use ntfy there.
 
 When push is available, DriftMail detects it and shows **Native notifications** in place of the ntfy step:
