@@ -420,6 +420,15 @@ final class MailStore {
         for id in Array(liveTasks.keys) { stopLive(for: id) }
     }
 
+    /// Drops the command connections when the app leaves the foreground: iOS and
+    /// mail servers often cut them silently while the app is suspended, and a
+    /// dead connection would stall the next message opened. New ones are made on demand.
+    func closeConnections() {
+        let open = Array(sessions.values)
+        sessions.removeAll()
+        Task { for session in open { await session.reset() } }
+    }
+
     private func startLive(for account: MailAccount) {
         guard liveTasks[account.id] == nil else { return }
         let inboxPath = inbox(for: account.id).path

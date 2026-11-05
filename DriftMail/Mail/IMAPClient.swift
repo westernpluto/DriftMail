@@ -248,17 +248,23 @@ final class IMAPClient: @unchecked Sendable {
         return String(format: "D%04d", tagCounter)
     }
 
-    @discardableResult
-    private func run(_ command: String, handler: ((IMAPUntagged) -> Void)? = nil) async throws -> String {
-        let tag = nextTag()
-        try await socket.write("\(tag) \(command)\r\n")
-        return try await waitForTag(tag, handler: handler)
+    /// Quick health check for a connection that has sat unused: fails fast
+    /// (instead of after the 90-second command timeout) if it silently died.
+    func noop(timeout: TimeInterval) async throws {
+        try await run("NOOP", timeout: timeout)
     }
 
     @discardableResult
-    private func waitForTag(_ tag: String, handler: ((IMAPUntagged) -> Void)?) async throws -> String {
+    private func run(_ command: String, timeout: TimeInterval = 90, handler: ((IMAPUntagged) -> Void)? = nil) async throws -> String {
+        let tag = nextTag()
+        try await socket.write("\(tag) \(command)\r\n")
+        return try await waitForTag(tag, timeout: timeout, handler: handler)
+    }
+
+    @discardableResult
+    private func waitForTag(_ tag: String, timeout: TimeInterval = 90, handler: ((IMAPUntagged) -> Void)?) async throws -> String {
         while true {
-            let response = try await readResponse(timeout: 90)
+            let response = try await readResponse(timeout: timeout)
             switch response {
             case .untagged(let untagged):
                 if untagged.keyword == "BYE" && handler == nil { continue }

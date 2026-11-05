@@ -5,6 +5,29 @@ import Foundation
 actor AccountSession {
     let account: MailAccount
     private var client: IMAPClient?
+    private var lastUsed = Date.distantPast
+    // IMAP is one conversation per connection. Actor methods interleave at every
+    // `await`, so without this gate two operations (e.g. a list refresh and opening
+    // a message) would talk over each other on one socket, and one would swallow
+    // the other's reply and hang until the timeout.
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquire() async {
+        if busy {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            busy = true
+        }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            busy = false
+        } else {
+            waiters.removeFirst().resume()  // hand the turn straight to the next one
+        }
+    }
 
     init(account: MailAccount) {
         self.account = account
@@ -18,16 +41,38 @@ actor AccountSession {
     }
 
     private func connected() async throws -> IMAPClient {
-        if let client { return client }
+        if let client {
+            // A connection left unused (app in the background, phone asleep) is often
+            // dropped without notice. Check it quickly rather than letting the next
+            // command hang for the full timeout while everything queues behind it.
+            if Date().timeIntervalSince(lastUsed) > 30 {
+                do {
+                    try await client.noop(timeout: 8)
+                    lastUsed = Date()
+                    return client
+                } catch {
+                    reset()
+                }
+            } else {
+                lastUsed = Date()
+                return client
+            }
+        }
         guard let password = Keychain.password(for: account) else { throw MailError.missingPassword }
         let fresh = IMAPClient(host: account.imapHost, port: account.imapPort)
         try await fresh.connect()
         try await fresh.login(username: account.username, password: password)
         client = fresh
+        lastUsed = Date()
         return fresh
     }
 
     private func perform<T>(_ operation: (IMAPClient) async throws -> T) async throws -> T {
+        await acquire()
+        defer {
+            if client != nil { lastUsed = Date() }
+            release()
+        }
         do {
             return try await operation(try await connected())
         } catch let error as MailError {

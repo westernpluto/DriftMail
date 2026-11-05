@@ -26,6 +26,7 @@ struct DriftMailApp: App {
                 Task { await relay.updateRelayIfNeeded() }
             case .background:
                 store.stopLive()
+                store.closeConnections()
                 NotificationService.updateBadge(store.unreadCount(.unifiedInbox))
                 Task { await Self.scheduleBackgroundRefresh() }
             default:
