@@ -9,10 +9,53 @@ enum SharedSecrets {
     private static let e2eAccount = "notification-e2e-key"
 
     /// From Info.plist: "$(AppIdentifierPrefix)app.driftmail.shared".
+    /// Filled in at build time for signed builds; for builds re-signed after the
+    /// fact (sideloaded with a paid account) it's derived from the signing team.
     static var accessGroup: String? {
-        guard let group = Bundle.main.object(forInfoDictionaryKey: "DriftKeychainGroup") as? String,
+        if let group = Bundle.main.object(forInfoDictionaryKey: "DriftKeychainGroup") as? String,
+           let prefix = group.split(separator: ".").first, prefix.count == 10 {
+            return group
+        }
+        return signingTeamID.map { "\($0).app.driftmail.shared" }
+    }
+
+    /// The signing Team ID, read from this binary's default keychain access group.
+    static let signingTeamID: String? = {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.driftmail.team-probe",
+            kSecAttrAccount as String: "probe",
+            kSecReturnAttributes as String: true,
+        ]
+        var result: AnyObject?
+        var status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecReturnAttributes as String] = nil
+            add[kSecValueData as String] = Data("probe".utf8)
+            SecItemAdd(add as CFDictionary, nil)
+            status = SecItemCopyMatching(query as CFDictionary, &result)
+        }
+        guard status == errSecSuccess,
+              let group = (result as? [String: Any])?[kSecAttrAccessGroup as String] as? String,
               let prefix = group.split(separator: ".").first, prefix.count == 10 else { return nil }
-        return group
+        return String(prefix)
+    }()
+
+    /// "development" or "production", from the push entitlement in this build's
+    /// provisioning profile. App Store/TestFlight builds have no embedded profile
+    /// and always use production.
+    static var apnsEnvironment: String {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .isoLatin1),
+              let start = text.range(of: "<?xml"), let end = text.range(of: "</plist>"),
+              start.lowerBound < end.upperBound,
+              let plistData = String(text[start.lowerBound..<end.upperBound]).data(using: .isoLatin1),
+              let plist = (try? PropertyListSerialization.propertyList(from: plistData, format: nil)) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let environment = entitlements["aps-environment"] as? String else { return "production" }
+        return environment == "development" ? "development" : "production"
     }
 
     static func get(_ account: String) -> Data? {

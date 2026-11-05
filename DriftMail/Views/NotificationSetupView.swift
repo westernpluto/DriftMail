@@ -210,7 +210,7 @@ struct NotificationSetupView: View {
                 subtitle: "DriftMail's own notifications. Private: your phone fetches the sender and subject itself, so the relay and Apple never see them.",
                 symbol: "apple.logo",
                 badge: relay.canUseNativePush ? "Recommended" : nil,
-                unavailableReason: relay.canUseNativePush ? nil : "Needs the TestFlight build signed with your Apple Developer account.",
+                unavailableReason: relay.canUseNativePush ? nil : "Needs DriftMail signed with a paid Apple Developer account: TestFlight, or sideloaded with your developer account.",
                 isSelected: relay.hasChosenDelivery && relay.delivery == .apns
             ) { relay.choose(.apns) }
 

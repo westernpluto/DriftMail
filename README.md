@@ -133,7 +133,14 @@ npx wrangler secret put PAIRING_CODE            # the code you'll type into the 
 
 ### Native notifications (paid Apple Developer account)
 
-In a TestFlight build (or any build signed with your team), DriftMail detects that push is available and shows **Native notifications** in place of the ntfy step:
+Apple Push works in any DriftMail build signed with a **paid** developer account whose provisioning profile includes push:
+
+- **TestFlight** (recommended): automatic updates, everything handled by the workflow.
+- **Sideloaded with your paid account**, e.g. Sideloadly signed in with your developer Apple ID: signatures last a year instead of 7 days. Whether push survives depends on the tool keeping the `aps-environment` entitlement and enabling Push on the App ID it creates. DriftMail tells you: **Apple Push** only becomes selectable when the phone actually received a push token.
+
+DriftMail picks Apple's sandbox or production push servers from the build's own provisioning profile, and its Team ID from the signature, so all of these work without changes. Free Apple IDs can't receive Apple Push; use ntfy there.
+
+When push is available, DriftMail detects it and shows **Native notifications** in place of the ntfy step:
 
 1. In your developer account, go to **Keys → +** and create a key with **Apple Push Notifications service (APNs)** enabled. Download the `AuthKey_XXXXXXXXXX.p8` file and save it to the Files app (iCloud Drive works).
 2. In DriftMail → **Instant Notifications**, tap **Choose the .p8 key file**. DriftMail reads the Key ID from the file name, and the Team ID and bundle ID from the app itself.

@@ -124,7 +124,7 @@ final class PushRelay {
         if useNative {
             if apnsToken == nil {
                 lastSyncSucceeded = false
-                lastMessage = "This build can't receive Apple Push. Install the TestFlight build, or choose ntfy."
+                lastMessage = "This build can't receive Apple Push. Install the TestFlight build or sideload it signed with your paid developer account, or choose ntfy."
                 return
             }
             if apnsCredentials == nil {
@@ -191,7 +191,7 @@ final class PushRelay {
 
     var apnsCredentials: CloudflareSetup.APNsCredentials? {
         guard let key = Keychain.get("relay.apnsKey"), let keyID = Keychain.get("relay.apnsKeyID"),
-              let teamID = Keychain.teamID(), let bundleID = Bundle.main.bundleIdentifier else { return nil }
+              let teamID = Keychain.teamID() ?? SharedSecrets.signingTeamID, let bundleID = Bundle.main.bundleIdentifier else { return nil }
         return CloudflareSetup.APNsCredentials(key: key, keyID: keyID, teamID: teamID, bundleID: bundleID)
     }
 
@@ -320,11 +320,9 @@ final class PushRelay {
         case .ntfy:
             return ["type": "ntfy", "server": ntfyServer, "topic": ntfyTopic]
         case .apns:
-            #if DEBUG
-            let environment = "development"
-            #else
-            let environment = "production"
-            #endif
+            // Matches however the app was signed (TestFlight, ad hoc, or sideloaded
+            // with a development certificate).
+            let environment = SharedSecrets.apnsEnvironment
             return ["type": "apns", "token": apnsToken ?? "", "environment": environment,
                     "topic": Bundle.main.bundleIdentifier ?? ""]
         }
