@@ -21,6 +21,7 @@ struct MailSplitView: View {
     // Which column the single-pane (outer display) layout shows.
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .content
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showSettings = false
     @State private var showNotificationSetup = false
     @AppStorage("didOfferNotificationSetup") private var didOfferNotificationSetup = false
@@ -49,8 +50,15 @@ struct MailSplitView: View {
                 preferredCompactColumn = .detail
             }
         }
-        // iOS resizes the app while it's in the background (app switcher snapshots),
-        // and the split view can collapse to the message alone. Bring the list back.
+        // DriftMail never offers a message-only layout (the toolbar button only shows
+        // and hides the mailbox sidebar), but the split view can fall into one by
+        // itself, e.g. when iOS resizes the app in the background for app switcher
+        // snapshots. Undo it right away on the inner display, and again on return.
+        .onChange(of: columnVisibility) { _, visibility in
+            if visibility == .detailOnly, horizontalSizeClass == .regular {
+                columnVisibility = .doubleColumn
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, columnVisibility == .detailOnly {
                 columnVisibility = .doubleColumn
