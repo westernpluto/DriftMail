@@ -49,8 +49,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build | tee xcodebuild.log | grep -E "error:|warning: .*(deprecated|unavailable)|BUILD (SUCCEEDED|FAILED)" || true
-          test -d build/Build/Products/Release-iphoneos/DriftMail.app
+            build > xcodebuild.log 2>&1 || true
+          grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" xcodebuild.log | sort -u || true
+          # The .app folder exists even after a failed compile, so check the result line.
+          grep -q "\*\* BUILD SUCCEEDED \*\*" xcodebuild.log
 
       - name: Show compiler errors
         if: failure()

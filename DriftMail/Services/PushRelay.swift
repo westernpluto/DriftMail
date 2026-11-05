@@ -109,8 +109,8 @@ final class PushRelay {
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let code = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !code.isEmpty { request.setValue(code, forHTTPHeaderField: "X-Pairing-Code") }
+        let pairing = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pairing.isEmpty { request.setValue(pairing, forHTTPHeaderField: "X-Pairing-Code") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
