@@ -188,6 +188,18 @@ struct NotificationSetupView: View {
                  : "The relay includes sender and subject in the notification (Apple sees them in transit). Use this if your signing tool doesn't support DriftMail's notification extension.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            // Why the latest notification showed only "New mail", if it did.
+            if relay.privateNotifications, let failure = NotificationDiagnostics.lastFailure,
+               NotificationDiagnostics.lastSuccess.map({ failure.date > $0 }) ?? true {
+                Label {
+                    Text("The last notification (\(failure.date.formatted(date: .abbreviated, time: .shortened)), \(failure.account)) couldn't load its sender and subject. \(failure.reason).")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                }
+                .font(.footnote)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+            }
         } header: {
             Text("2 · Add your Apple Push key")
         } footer: {

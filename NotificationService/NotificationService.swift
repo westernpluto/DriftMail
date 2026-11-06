@@ -63,17 +63,36 @@ final class NotificationService: UNNotificationServiceExtension {
         let mailbox = payload["mailbox"] as? String ?? "INBOX"
 
         work = Task {
-            if let summary = await Self.fetchSummary(account: account, password: password, mailbox: mailbox, uid: uid) {
-                content.title = summary.from.displayName
-                content.subtitle = summary.subject.isEmpty ? "(No subject)" : summary.subject
-                content.body = summary.preview
+            // Two tries on fresh connections: a phone waking on cellular often loses
+            // the first connection attempt. iOS gives the extension about 30 seconds.
+            var failure = ""
+            attempts: for (attempt, budget) in [(1, 10.0), (2, 12.0)] {
+                if Task.isCancelled { break }
+                switch await Self.fetchSummary(account: account, password: password, mailbox: mailbox,
+                                               uid: uid, timeout: budget) {
+                case .success(let summary):
+                    content.title = summary.from.displayName
+                    content.subtitle = summary.subject.isEmpty ? "(No subject)" : summary.subject
+                    content.body = summary.preview
+                    NotificationDiagnostics.recordSuccess()
+                    self.finish()
+                    return
+                case .failure(let error):
+                    failure = "Attempt \(attempt): \(error.localizedDescription)"
+                    if case FetchError.notFound = error { break attempts }  // retrying won't help
+                }
             }
+            NotificationDiagnostics.recordFailure(failure, account: account.email)
             self.finish()
         }
     }
 
     override func serviceExtensionTimeWillExpire() {
         work?.cancel()
+        if contentHandler != nil, let email = SharedAccounts.account(
+            (content?.userInfo["account"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID())?.email {
+            NotificationDiagnostics.recordFailure("iOS stopped the notification extension before it finished", account: email)
+        }
         finish()
     }
 
@@ -91,32 +110,70 @@ final class NotificationService: UNNotificationServiceExtension {
         return (try? JSONSerialization.jsonObject(with: plain)) as? [String: Any]
     }
 
-    /// Signs in over TLS and fetches the start of one message. Gives up after 20 s.
-    private static func fetchSummary(account: MailAccount, password: String, mailbox: String, uid: UInt32) async -> MessageSummary? {
-        await withTaskGroup(of: MessageSummary?.self) { group in
-            group.addTask {
-                let client = IMAPClient(host: account.imapHost, port: account.imapPort)
-                defer { client.close() }
-                do {
-                    try await client.connect()
-                    try await client.login(username: account.username, password: password)
-                    try await client.select(mailbox, readOnly: true)
-                    guard let item = try await client.fetchPreviews(uids: [uid], previewBytes: 8192).first(where: { $0.uid == uid }) else {
-                        return nil
+    enum FetchError: LocalizedError {
+        case timedOut(step: String, seconds: Double)
+        case failed(step: String, reason: String)
+        case notFound
+
+        var errorDescription: String? {
+            switch self {
+            case .timedOut(let step, let seconds): return "timed out after \(Int(seconds)) s while \(step)"
+            case .failed(let step, let reason): return "failed while \(step): \(reason)"
+            case .notFound: return "the message was no longer in the mailbox"
+            }
+        }
+    }
+
+    /// Which step an attempt is on, for the diagnostics.
+    private final class Step: @unchecked Sendable {
+        var name = "connecting"
+        var timedOut = false
+    }
+
+    /// Signs in over TLS and fetches the start of one message, giving up after `timeout`
+    /// seconds. On a timeout the connection is closed at once so nothing lingers.
+    private static func fetchSummary(account: MailAccount, password: String, mailbox: String,
+                                     uid: UInt32, timeout: Double) async -> Result<MessageSummary, Error> {
+        let client = IMAPClient(host: account.imapHost, port: account.imapPort)
+        let step = Step()
+        defer { client.close() }
+        do {
+            return .success(try await withThrowingTaskGroup(of: MessageSummary.self) { group in
+                group.addTask {
+                    do {
+                        try await client.connect()
+                        step.name = "signing in"
+                        try await client.login(username: account.username, password: password)
+                        step.name = "opening \(mailbox)"
+                        try await client.select(mailbox, readOnly: true)
+                        step.name = "fetching the message"
+                        // 16 KB: some senders put more than 8 KB of routing headers before From/Subject.
+                        guard let item = try await client.fetchPreviews(uids: [uid], previewBytes: 16384)
+                            .first(where: { $0.uid == uid }) else { throw FetchError.notFound }
+                        return MIME.summary(from: item.body ?? [], accountID: account.id, mailbox: mailbox,
+                                            uid: uid, flags: item.flags, internalDate: item.internalDate)
+                    } catch let error as FetchError {
+                        throw error
+                    } catch {
+                        // The timeout below closes the connection, which also lands here.
+                        if step.timedOut { throw FetchError.timedOut(step: step.name, seconds: timeout) }
+                        throw FetchError.failed(step: step.name, reason: error.localizedDescription)
                     }
-                    return MIME.summary(from: item.body ?? [], accountID: account.id, mailbox: mailbox,
-                                        uid: uid, flags: item.flags, internalDate: item.internalDate)
-                } catch {
-                    return nil
                 }
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(20))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+                group.addTask {
+                    try await Task.sleep(for: .seconds(timeout))
+                    // Close the connection so the stalled step above fails now: the group
+                    // waits for every task, and a socket read could otherwise hang for 90 s.
+                    step.timedOut = true
+                    client.close()
+                    throw FetchError.timedOut(step: step.name, seconds: timeout)
+                }
+                defer { group.cancelAll() }
+                guard let first = try await group.next() else { throw FetchError.notFound }
+                return first
+            })
+        } catch {
+            return .failure(error)
         }
     }
 }
