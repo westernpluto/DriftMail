@@ -189,10 +189,17 @@ struct NotificationSetupView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             // Why the latest notification showed only "New mail", if it did.
-            if relay.privateNotifications, let failure = NotificationDiagnostics.lastFailure,
-               NotificationDiagnostics.lastSuccess.map({ failure.date > $0 }) ?? true {
+            // Kept even after later notifications succeed, so an occasional
+            // "New mail" can still be explained afterwards.
+            if relay.privateNotifications, let failure = NotificationDiagnostics.lastFailure {
                 Label {
-                    Text("The last notification (\(failure.date.formatted(date: .abbreviated, time: .shortened)), \(failure.account)) couldn't load its sender and subject. \(failure.reason).")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Last notification without details: \(failure.date.formatted(date: .abbreviated, time: .standard)), \(failure.account). \(failure.reason).")
+                        if let success = NotificationDiagnostics.lastSuccess, success > failure.date {
+                            Text("Later notifications loaded fine (latest \(success.formatted(date: .abbreviated, time: .standard))).")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } icon: {
                     Image(systemName: "exclamationmark.triangle")
                 }

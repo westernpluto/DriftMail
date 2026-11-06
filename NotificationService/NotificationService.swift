@@ -21,6 +21,11 @@ final class NotificationService: UNNotificationServiceExtension {
 
         guard let encoded = content.userInfo["enc"] as? String,
               let payload = Self.decrypt(encoded) else {
+            if content.userInfo["enc"] != nil {
+                NotificationDiagnostics.recordFailure(
+                    "Couldn't decrypt it: the key on this phone doesn't match the relay's (set up Apple Push again)",
+                    account: "unknown account")
+            }
             contentHandler(content)
             return
         }
@@ -57,6 +62,15 @@ final class NotificationService: UNNotificationServiceExtension {
         guard let account,
               let uid = (payload["uid"] as? Int).map({ UInt32($0) }),
               let password = SharedAccounts.password(for: account.id) else {
+            let reason: String
+            if account == nil {
+                reason = "The account it was for isn't shared with the notification extension (open DriftMail once)"
+            } else if (payload["uid"] as? Int) == nil {
+                reason = "The relay didn't say which message it was"
+            } else {
+                reason = "Couldn't read the account's password from the shared keychain"
+            }
+            NotificationDiagnostics.recordFailure(reason, account: account?.email ?? "unknown account")
             contentHandler(content)
             return
         }
