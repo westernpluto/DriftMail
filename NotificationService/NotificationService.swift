@@ -59,6 +59,32 @@ final class NotificationService: UNNotificationServiceExtension {
             return
         }
 
+        // Fast path: the relay sealed the sender and subject into the push (only this phone
+        // can decrypt them), so the notification shows right away with no mail-server sign-in.
+        if let from = payload["from"] as? String {
+            content.title = from
+            let subject = (payload["subject"] as? String) ?? ""
+            content.body = subject.isEmpty ? "(No subject)" : subject
+            NotificationDiagnostics.recordSuccess()
+            guard let account, let uid = (payload["uid"] as? Int).map({ UInt32($0) }),
+                  let password = SharedAccounts.password(for: account.id) else {
+                contentHandler(content)
+                return
+            }
+            let mailbox = payload["mailbox"] as? String ?? "INBOX"
+            // A preview line is a bonus: allow it about 3 seconds, never longer.
+            work = Task {
+                if case .success(let summary) = await Self.fetchSummary(account: account, password: password,
+                                                                        mailbox: mailbox, uid: uid, timeout: 3),
+                   !summary.preview.isEmpty {
+                    content.subtitle = content.body
+                    content.body = summary.preview
+                }
+                self.finish()
+            }
+            return
+        }
+
         guard let account,
               let uid = (payload["uid"] as? Int).map({ UInt32($0) }),
               let password = SharedAccounts.password(for: account.id) else {

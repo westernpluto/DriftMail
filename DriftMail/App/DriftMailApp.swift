@@ -7,6 +7,7 @@ struct DriftMailApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var store = MailStore.shared
     @State private var relay = PushRelay.shared
+    @State private var lock = AppLock.shared
 
     static let refreshTaskID = "app.driftmail.refresh"
 
@@ -17,14 +18,23 @@ struct DriftMailApp: App {
                 .environment(relay)
                 .tint(Theme.accent)
                 .onOpenURL { url in handle(url) }
+                // Face ID lock: covers mail while locked and in the app switcher.
+                .overlay {
+                    if lock.isLocked || (lock.isEnabled && scenePhase != .active) {
+                        LockScreen()
+                    }
+                }
+                .task { HTMLView.prewarm() }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                Task { await lock.unlock() }
                 store.startLive()
                 Task { await store.refreshAll() }
                 Task { await relay.updateRelayIfNeeded() }
             case .background:
+                lock.lock()
                 store.stopLive()
                 store.closeConnections()
                 NotificationService.updateBadge(store.unreadCount(.unifiedInbox))

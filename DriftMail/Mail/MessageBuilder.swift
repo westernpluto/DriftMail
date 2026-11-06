@@ -42,6 +42,10 @@ enum MessageBuilder {
         if let references = message.references { headers.append("References: \(references)") }
         headers.append("MIME-Version: 1.0")
         headers.append("User-Agent: DriftMail")
+        // Security: values such as a reply's subject, In-Reply-To/References and names come
+        // from the original (untrusted) email. A line break inside one would let its
+        // sender inject extra headers into your reply (e.g. a hidden "Bcc:" to themselves).
+        headers = headers.map { $0.replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ") }
 
         let textPart = [
             "Content-Type: text/plain; charset=utf-8",

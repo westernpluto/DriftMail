@@ -51,7 +51,8 @@ enum MIME {
     // MARK: Parsing
 
     static func parse(_ bytes: [UInt8]) -> MIMEPart {
-        let (headerBytes, body) = splitHeaderAndBody(bytes)
+        let (rawHeaderBytes, body) = splitHeaderAndBody(bytes)
+        let headerBytes = rejoinSplitCharacters(rawHeaderBytes)
         let headerText = String(data: Data(headerBytes), encoding: .utf8) ?? String(decoding: headerBytes, as: UTF8.self)
         let headers = parseHeaders(headerText)
         let typeHeader = headers.first { $0.name == "content-type" }?.value ?? "text/plain; charset=us-ascii"
@@ -64,6 +65,45 @@ enum MIME {
             part.children = [parse(Array(part.decodedBody))]
         }
         return part
+    }
+
+    /// Some senders put raw UTF-8 in headers and their servers fold long lines at a byte
+    /// count, inside a multi-byte character (e.g. Japanese). Such a fold is removed
+    /// entirely so the character is whole again; ordinary folds are left alone.
+    static func rejoinSplitCharacters(_ bytes: [UInt8]) -> [UInt8] {
+        guard bytes.contains(where: { $0 >= 0x80 }) else { return bytes }
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            var fold = 0
+            if bytes[i] == 13, i + 2 < bytes.count, bytes[i + 1] == 10, bytes[i + 2] == 32 || bytes[i + 2] == 9 {
+                fold = 3
+            } else if bytes[i] == 10, i + 1 < bytes.count, bytes[i + 1] == 32 || bytes[i + 1] == 9 {
+                fold = 2
+            }
+            if fold > 0, i + fold < bytes.count, bytes[i + fold] & 0xC0 == 0x80, endsMidCharacter(out) {
+                i += fold
+                continue
+            }
+            out.append(bytes[i])
+            i += 1
+        }
+        return out
+    }
+
+    /// True if `bytes` ends with an incomplete UTF-8 sequence.
+    private static func endsMidCharacter(_ bytes: [UInt8]) -> Bool {
+        var continuation = 0
+        var index = bytes.count - 1
+        while index >= 0, bytes[index] & 0xC0 == 0x80, continuation < 3 {
+            continuation += 1
+            index -= 1
+        }
+        guard index >= 0 else { return false }
+        let lead = bytes[index]
+        let needed = lead >= 0xF0 ? 3 : lead >= 0xE0 ? 2 : lead >= 0xC0 ? 1 : 0
+        return needed > continuation
     }
 
     static func splitHeaderAndBody(_ bytes: [UInt8]) -> ([UInt8], [UInt8]) {
@@ -200,8 +240,12 @@ enum MIME {
         var clean = bytes.filter { b in
             (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 43 || b == 47
         }
-        // Allow truncated input (used for previews).
-        clean = Array(clean.prefix(clean.count - clean.count % 4))
+        // Restore padding instead of trimming: trimming to a multiple of 4 dropped the last
+        // 1-2 bytes of any padded input, which turned the last character of each encoded
+        // subject chunk (emoji, Japanese…) into "?" and cut the end off attachments.
+        // A single leftover character can't encode a byte (truncated preview input).
+        if clean.count % 4 == 1 { clean.removeLast() }
+        clean.append(contentsOf: [UInt8](repeating: 61, count: (4 - clean.count % 4) % 4))  // "="
         let padded = Data(clean)
         if let data = Data(base64Encoded: padded) { return data }
         return Data()
@@ -278,9 +322,15 @@ enum MIME {
         var result = ""
         var last = 0
         var pending = Data()
+        var pendingBase64 = ""
         var pendingCharset: String?
 
+        func flushBase64() {
+            if !pendingBase64.isEmpty { pending.append(decodeBase64(Array(pendingBase64.utf8))) }
+            pendingBase64 = ""
+        }
         func flush() {
+            flushBase64()
             if !pending.isEmpty { result += string(from: pending, charset: pendingCharset) }
             pending = Data()
             pendingCharset = nil
@@ -291,19 +341,23 @@ enum MIME {
             let charset = ns.substring(with: match.range(at: 1)).components(separatedBy: "*").first?.lowercased()
             let mode = ns.substring(with: match.range(at: 2)).uppercased()
             let text = ns.substring(with: match.range(at: 3))
-            let data = mode == "B"
-                ? decodeBase64(Array(text.utf8))
-                : decodeQuotedPrintable(Array(text.utf8), underscoreIsSpace: true)
 
             // Whitespace between two encoded words is dropped; anything else ends the run.
-            let adjacent = !pending.isEmpty && between.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if adjacent && charset == pendingCharset {
-                pending.append(data)
-            } else {
+            let inRun = !pending.isEmpty || !pendingBase64.isEmpty
+            let adjacent = inRun && between.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if !(adjacent && charset == pendingCharset) {
                 flush()
                 if !adjacent { result += between }
-                pending = data
                 pendingCharset = charset
+            }
+            if mode == "B" {
+                // Normally each word is complete base64; some senders split the base64 text
+                // itself across words, so collect it until it lines up on 4 characters.
+                pendingBase64 += text.filter { !$0.isWhitespace }
+                if pendingBase64.count % 4 == 0 { flushBase64() }
+            } else {
+                flushBase64()
+                pending.append(decodeQuotedPrintable(Array(text.utf8), underscoreIsSpace: true))
             }
             last = match.range.location + match.range.length
         }

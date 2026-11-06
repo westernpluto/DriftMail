@@ -74,6 +74,8 @@
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>DriftMail uses Face ID to unlock your mail when the lock is turned on.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>DriftMail attaches the photos you choose to your email.</string>
 </dict>

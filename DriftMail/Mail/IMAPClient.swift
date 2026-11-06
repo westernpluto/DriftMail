@@ -385,7 +385,13 @@ final class IMAPClient: @unchecked Sendable {
     }
 
     private func quote(_ value: String) -> String {
-        let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        // Security: a CR, LF or NUL would end the command early and let the rest run as a
+        // new IMAP command (e.g. from text pasted into search). None is valid in a quoted string.
+        // (Filtered per scalar: "\r\n" together is a single Swift Character.)
+        var scalars = value.unicodeScalars
+        scalars.removeAll { $0 == "\r" || $0 == "\n" || $0 == "\0" }
+        let safe = String(scalars)
+        let escaped = safe.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
     }
 

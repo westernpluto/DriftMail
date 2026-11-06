@@ -4,6 +4,14 @@ import Foundation
 enum SMTPClient {
     static func send(account: MailAccount, password: String, envelopeFrom: String,
                      recipients: [String], message: Data) async throws {
+        // Security: an address with a line break, space or angle bracket could smuggle extra
+        // SMTP commands (e.g. another RCPT TO) into the session. Refuse it outright.
+        for address in [envelopeFrom] + recipients {
+            guard !address.isEmpty, address.contains("@"),
+                  address.rangeOfCharacter(from: CharacterSet(charactersIn: "\r\n <>\t")) == nil else {
+                throw MailError.server("Invalid email address: \(address.prefix(80))")
+            }
+        }
         let implicit = account.smtpSecurity == .tls
         let socket = MailSocket(host: account.smtpHost, port: account.smtpPort, implicitTLS: implicit)
         defer { socket.close() }

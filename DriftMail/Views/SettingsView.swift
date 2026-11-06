@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var editing: MailAccount?
     @State private var confirmRemove: MailAccount?
     @AppStorage(SenderLogos.enabledKey) private var showSenderLogos = true
+    @AppStorage(AppLock.enabledKey) private var requireFaceID = false
+    @AppStorage(RemoteContent.blockKey) private var blockRemoteImages = false
 
     var body: some View {
         NavigationStack {
@@ -48,6 +50,28 @@ struct SettingsView: View {
                     } label: {
                         Label("Add Account", systemImage: "plus.circle.fill")
                     }
+                }
+
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { requireFaceID },
+                        set: { on in
+                            if on {
+                                // Only turn the lock on after a successful Face ID / passcode check.
+                                Task { if await AppLock.confirmCanEnable() { requireFaceID = true } }
+                            } else {
+                                requireFaceID = false
+                            }
+                        })) {
+                        Label("Require Face ID", systemImage: "faceid")
+                    }
+                    Toggle(isOn: $blockRemoteImages) {
+                        Label("Block Remote Images", systemImage: "eye.slash")
+                    }
+                } header: {
+                    Text("Privacy & Security")
+                } footer: {
+                    Text("Face ID locks DriftMail when you leave it and hides your mail in the app switcher. Blocking remote images stops tracking pixels from telling senders when and where you opened their email; tap Load Images in a message to see them.")
                 }
 
                 Section {

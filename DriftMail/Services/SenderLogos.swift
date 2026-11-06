@@ -107,6 +107,14 @@ final class SenderLogos {
             .trimmingCharacters(in: CharacterSet(charactersIn: " <>\"'"))
         let labels = host.split(separator: ".").map(String.init)
         guard labels.count >= 2, labels.allSatisfy({ !$0.isEmpty }) else { return nil }
+        // Security: the domain comes from the (untrusted) sender. Never fetch from IP
+        // addresses or local-network names, which could make the phone contact devices
+        // on your own network.
+        let localSuffixes = ["local", "lan", "home", "internal", "localhost", "arpa"]
+        if host.hasPrefix("[") || labels.allSatisfy({ $0.allSatisfy(\.isNumber) })
+            || localSuffixes.contains(labels.last!) || labels.last!.allSatisfy(\.isNumber) {
+            return nil
+        }
         // Keep three labels for "example.co.uk"-style domains, two otherwise.
         let secondLevel: Set<String> = ["co", "com", "org", "net", "gov", "edu", "ac", "ne", "or"]
         let keep = labels.count >= 3 && labels.last!.count == 2 && secondLevel.contains(labels[labels.count - 2]) ? 3 : 2

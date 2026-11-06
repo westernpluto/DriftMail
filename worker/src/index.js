@@ -18,7 +18,7 @@ const OWNER_KEY = "owner";
 const STATUS_KEY = "status";
 const APNS_JWT_KEY = "apns-jwt";
 const MAX_NOTIFICATIONS_PER_ACCOUNT = 5;
-const DEFAULT_IDLE_SECONDS = 50;
+const DEFAULT_IDLE_SECONDS = 56;  // the next run starts each minute; keeps the gap to a few seconds
 const PAIR_FAILS_KEY = "pair-fails";
 const MAX_PAIR_FAILS = 10;                 // wrong pairing codes allowed…
 const PAIR_LOCKOUT_MS = 60 * 60 * 1000;    // …per hour before pairing locks   // stay connected this long per one-minute run
@@ -35,7 +35,7 @@ export default {
   async scheduled(event, env, ctx) {
     const configured = Number(env.IDLE_SECONDS);
     const seconds = Number.isFinite(configured) && env.IDLE_SECONDS !== undefined ? configured : DEFAULT_IDLE_SECONDS;
-    const idleUntil = seconds > 0 ? Date.now() + Math.min(seconds, 55) * 1000 : 0;
+    const idleUntil = seconds > 0 ? Date.now() + Math.min(seconds, 58) * 1000 : 0;
     await checkAll(env, { idleUntil });
   },
 };
@@ -284,8 +284,11 @@ async function runAccount(env, config, account, state, { baselineOnly, idleUntil
 /// sender or subject. It only learns that message #N arrived; the phone fetches
 /// the details itself. The same applies whenever previews are turned off.
 function relayReadsHeaders(config) {
-  const zeroKnowledge = config.delivery?.type === "apns" && !!config.e2eKey;
-  return !zeroKnowledge && config.showPreviews !== false;
+  // With "Show sender and subject" on, the relay reads From and Subject so the
+  // notification can show them at once. For private (end-to-end) Apple Push they are
+  // sealed with the phone's key, so Apple still only sees ciphertext. With it off, the
+  // relay never reads them and the phone fetches them itself (slower).
+  return config.showPreviews !== false;
 }
 
 /// Fetches messages from the remembered UID onward and notifies for unread ones.
@@ -486,21 +489,55 @@ function parseHeaders(text) {
   return out;
 }
 
+/// Base64 to bytes, tolerating missing padding and a stray trailing character.
+function b64Bytes(text) {
+  let clean = text.replace(/[^A-Za-z0-9+/]/g, "");
+  if (clean.length % 4 === 1) clean = clean.slice(0, -1);
+  while (clean.length % 4) clean += "=";
+  return Array.from(atob(clean), (c) => c.charCodeAt(0));
+}
+
+/// RFC 2047 encoded words. Adjacent words in one charset are decoded together: senders
+/// often split a multi-byte character (emoji, Japanese…) across two words, and decoding
+/// each word alone turned it into "?".
 function decodeWords(value) {
-  return value
-    .replace(/(=\?[^?]+\?[bBqQ]\?[^?]*\?=)\s+(?==\?)/g, "$1")
-    .replace(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_, charset, mode, data) => {
-      let bytes;
-      if (mode.toUpperCase() === "B") {
-        const bin = atob(data.replace(/[^A-Za-z0-9+/=]/g, ""));
-        bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
-      } else {
-        const s = data.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-        bytes = Uint8Array.from(s, (c) => c.charCodeAt(0));
-      }
-      try { return new TextDecoder(charset.toLowerCase().split("*")[0]).decode(bytes); }
-      catch { return decodeBytes(bytes); }
-    });
+  const re = /=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g;
+  let out = "";
+  let last = 0;
+  let run = null;
+  const flushBase64 = () => {
+    if (run && run.b64) { run.bytes.push(...b64Bytes(run.b64)); run.b64 = ""; }
+  };
+  const finish = () => {
+    if (!run) return;
+    flushBase64();
+    const bytes = new Uint8Array(run.bytes);
+    try { out += new TextDecoder(run.charset).decode(bytes); }
+    catch { out += decodeBytes(bytes); }
+    run = null;
+  };
+  let match;
+  while ((match = re.exec(value))) {
+    const between = value.slice(last, match.index);
+    const charset = match[1].toLowerCase().split("*")[0];
+    const adjacent = run !== null && between.trim() === "";
+    if (!(adjacent && run.charset === charset)) {
+      finish();
+      if (!adjacent) out += between;
+      run = { charset, bytes: [], b64: "" };
+    }
+    if (match[2].toUpperCase() === "B") {
+      run.b64 += match[3].replace(/\s/g, "");
+      if (run.b64.length % 4 === 0) flushBase64();
+    } else {
+      flushBase64();
+      const text = match[3].replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+      for (const c of text) run.bytes.push(c.charCodeAt(0) & 0xff);
+    }
+    last = match.index + match[0].length;
+  }
+  finish();
+  return out + value.slice(last);
 }
 
 function displayName(from) {
@@ -541,10 +578,12 @@ async function deliver(env, config, message) {
     if (config.e2eKey) {
       // End-to-end encrypted: Apple only sees a placeholder and ciphertext.
       // DriftMail's notification extension decrypts it on the phone.
-      // Only a reference to the message: the phone fetches sender and subject itself.
+      // A reference to the message, plus sender and subject when the relay read them
+      // (sealed: only the phone can read them), so the notification shows instantly.
       const secret = { ...reference };
       if (message.more) secret.more = message.more;
       if (message.test) Object.assign(secret, { title: message.title, body: message.body });
+      else if (message.title != null && !message.more) Object.assign(secret, { from: message.title, subject: message.body });
       const sealed = await sealForPhone(env, config.e2eKey, secret);
       payload = {
         aps: { alert: { title: "DriftMail", body: "New mail" }, sound: "default", "mutable-content": 1, "thread-id": "driftmail", category: "NEW_MAIL" },

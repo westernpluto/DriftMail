@@ -109,7 +109,7 @@ struct NotificationSetupView: View {
             } header: {
                 Text("Privacy")
             } footer: {
-                Text("Applies to ntfy. Turned off, the relay never reads sender or subject and ntfy only sees \u{201C}New mail\u{201D}. Native notifications are always private. Your app passwords are stored encrypted in your own Cloudflare account so the relay can watch your inbox.")
+                Text("On: your relay reads each new message\u{2019}s sender and subject so notifications appear instantly. With Apple Push they are encrypted so only this phone can read them; Apple never sees them. Off: the relay never reads them, ntfy shows \u{201C}New mail\u{201D}, and Apple Push notifications take a few seconds longer while your phone fetches them itself. Your app passwords are stored encrypted in your own Cloudflare account so the relay can watch your inbox.")
             }
 
             Section {
@@ -184,7 +184,7 @@ struct NotificationSetupView: View {
                 get: { relay.privateNotifications },
                 set: { relay.privateNotifications = $0; Task { await relay.syncIfConfigured() } }))
             Text(relay.privateNotifications
-                 ? "Your phone fetches sender and subject itself; the relay and Apple never see them. If Send Test Notification shows only \u{201C}New mail\u{201D}, your signing tool didn't set up DriftMail's notification extension: turn this off."
+                 ? "Notifications are end-to-end encrypted: Apple only ever sees ciphertext, and only this phone can read the sender and subject. If Send Test Notification shows only \u{201C}New mail\u{201D}, your signing tool didn't set up DriftMail's notification extension: turn this off."
                  : "The relay includes sender and subject in the notification (Apple sees them in transit). Use this if your signing tool doesn't support DriftMail's notification extension.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)

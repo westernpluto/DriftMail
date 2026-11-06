@@ -179,7 +179,10 @@ struct ComposeView: View {
 
     private func fieldRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // Top alignment, not baseline: an empty multi-line field (To) has no text
+            // baseline, which pushed the field and its cursor below the label. Label and
+            // field share a font, so their first lines line up by their tops.
+            HStack(alignment: .top, spacing: 8) {
                 Text(label)
                     .foregroundStyle(.secondary)
                 content()

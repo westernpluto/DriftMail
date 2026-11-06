@@ -51,6 +51,10 @@ final class MailStore {
     var compose: ComposeContext?
 
     @ObservationIgnored private var sessions: [UUID: AccountSession] = [:]
+    /// A second connection per account for opening (and prefetching) messages, so opening
+    /// an email never waits behind a list refresh on the first one.
+    @ObservationIgnored private var bodySessions: [UUID: AccountSession] = [:]
+    @ObservationIgnored private var prefetching: Set<String> = []
     @ObservationIgnored private var liveTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var highestSeenUID: [String: UInt32] = [:]
     @ObservationIgnored private var bodyCache: [MessageSummary.ID: MessageBody] = [:]
@@ -60,7 +64,7 @@ final class MailStore {
     /// Bump when the way summaries (subject, sender, preview) are decoded changes, so
     /// messages saved by an older version are downloaded again instead of keeping
     /// e.g. "?" for emoji or CSS in the preview.
-    private static let cacheVersion = 2
+    private static let cacheVersion = 3  // 3: base64 padding fix (subjects ending in "?")
 
     init() {
         let snapshot = Persistence.load()
@@ -101,6 +105,13 @@ final class MailStore {
     }
 
     // MARK: Lookups
+
+    func bodySession(for account: MailAccount) -> AccountSession {
+        if let existing = bodySessions[account.id], existing.account == account { return existing }
+        let session = AccountSession(account: account)
+        bodySessions[account.id] = session
+        return session
+    }
 
     func session(for account: MailAccount) -> AccountSession {
         if let existing = sessions[account.id], existing.account == account { return existing }
@@ -221,6 +232,7 @@ final class MailStore {
         shareAccountsWithExtension()
         await sessions[account.id]?.reset()
         sessions[account.id] = nil
+        bodySessions[account.id] = nil
         stopLive(for: account.id)
         if liveEnabled { startLive(for: account) }
         save()
@@ -230,6 +242,7 @@ final class MailStore {
     func removeAccount(_ account: MailAccount) {
         stopLive(for: account.id)
         sessions[account.id] = nil
+        bodySessions[account.id] = nil
         Keychain.deletePassword(for: account)
         accounts.removeAll { $0.id == account.id }
         SharedAccounts.remove(account.id)
@@ -324,6 +337,7 @@ final class MailStore {
                 unreadCounts[box.id] = count
             }
             save()
+            if box.role == .inbox || selection == .mailbox(box) { prefetchBodies(in: box) }
             return previousHighest == 0 ? [] : fresh
         } catch {
             report(error, account: account)
@@ -358,6 +372,26 @@ final class MailStore {
 
     // MARK: Message bodies
 
+    /// Downloads the newest messages of a mailbox in the background so they open
+    /// instantly. One at a time on the body connection, so a message you tap waits
+    /// behind at most one prefetch. Already-downloaded ones are skipped.
+    private func prefetchBodies(in box: Mailbox, count: Int = 12) {
+        guard !prefetching.contains(box.id), let account = account(box.accountID) else { return }
+        let targets = (messagesByMailbox[box.id] ?? []).prefix(count)
+            .filter { !Persistence.hasCachedRawMessage($0.id) }
+        guard !targets.isEmpty else { return }
+        prefetching.insert(box.id)
+        Task { [weak self] in
+            defer { self?.prefetching.remove(box.id) }
+            for summary in targets {
+                guard let self, self.liveEnabled else { return }  // stop when the app leaves the screen
+                guard let raw = try? await self.bodySession(for: account)
+                    .rawMessage(mailbox: summary.mailboxPath, uid: summary.uid) else { continue }
+                Persistence.cacheRawMessage(raw, id: summary.id)
+            }
+        }
+    }
+
     func body(for summary: MessageSummary) async throws -> MessageBody {
         if let cached = bodyCache[summary.id] { return cached }
         let raw: [UInt8]
@@ -365,7 +399,7 @@ final class MailStore {
             raw = cachedRaw
         } else {
             guard let account = account(summary.accountID) else { throw MailError.notFound }
-            raw = try await session(for: account).rawMessage(mailbox: summary.mailboxPath, uid: summary.uid)
+            raw = try await bodySession(for: account).rawMessage(mailbox: summary.mailboxPath, uid: summary.uid)
             Persistence.cacheRawMessage(raw, id: summary.id)
         }
         // Parsing and preview text stay off the main thread: a very large HTML email
@@ -524,8 +558,9 @@ final class MailStore {
     /// mail servers often cut them silently while the app is suspended, and a
     /// dead connection would stall the next message opened. New ones are made on demand.
     func closeConnections() {
-        let open = Array(sessions.values)
+        let open = Array(sessions.values) + Array(bodySessions.values)
         sessions.removeAll()
+        bodySessions.removeAll()
         Task { for session in open { await session.reset() } }
     }
 

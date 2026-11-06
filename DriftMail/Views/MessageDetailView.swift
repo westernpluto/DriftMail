@@ -13,6 +13,9 @@ struct MessageDetailView: View {
     @State private var previewURL: URL?
     /// Plain text for Share, made once in the background (not on every redraw).
     @State private var shareText: String?
+    /// Remote images were allowed for this message (Load Images) while blocking is on.
+    @State private var allowRemoteContent = false
+    @AppStorage(RemoteContent.blockKey) private var blockRemoteImages = false
 
     var body: some View {
         ScrollView {
@@ -27,10 +30,17 @@ struct MessageDetailView: View {
                             .backgroundExtensionEffect()
                     }
                 if let html = body_?.html {
+                    let blocking = blockRemoteImages && !allowRemoteContent && HTMLView.hasRemoteContent(html)
+                    if blocking {
+                        remoteContentBar
+                    }
                     // HTML email: the full column, edge to edge like Apple Mail. The email's
                     // own layout decides its margins (simple ones get margins in HTMLView).
-                    HTMLView(html: html, height: $htmlHeight)
-                        .frame(height: htmlHeight)
+                    HTMLView(html: html, height: $htmlHeight, blockRemoteContent: blocking) { address in
+                        store.compose = ComposeContext(mode: .new, to: address)
+                    }
+                    .frame(height: htmlHeight)
+                    .id(blocking)  // rebuilt without the block after Load Images
                 }
                 VStack(alignment: .leading, spacing: 0) {
                     if body_?.html == nil {
@@ -129,6 +139,25 @@ struct MessageDetailView: View {
 
     // MARK: Body
 
+    private var remoteContentBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "eye.slash")
+                .foregroundStyle(.secondary)
+            Text("Remote images are blocked to protect your privacy.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("Load Images") { allowRemoteContent = true }
+                .font(.footnote.weight(.semibold))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+    }
+
     @ViewBuilder
     private var content: some View {
         if let body = body_ {
@@ -182,7 +211,13 @@ struct MessageDetailView: View {
     private func write(_ attachment: MailAttachment) -> URL? {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let safeName = attachment.filename.replacingOccurrences(of: "/", with: "-")
+        // Security: the file name comes from the sender. Keep only a plain name (no
+        // folders, "..", control characters or hidden-file dots) so it can't escape `dir`.
+        var scalars = attachment.filename.unicodeScalars
+        scalars.removeAll { CharacterSet.controlCharacters.contains($0) || "/\\:".unicodeScalars.contains($0) }
+        var safeName = String(scalars).trimmingCharacters(in: .whitespaces)
+        while safeName.hasPrefix(".") { safeName.removeFirst() }
+        safeName = String(safeName.prefix(120))
         let url = dir.appendingPathComponent(safeName.isEmpty ? "attachment" : safeName)
         do {
             try attachment.data.write(to: url)
@@ -277,6 +312,8 @@ struct MessageDetailView: View {
         loadError = nil
         do {
             let loaded = try await store.body(for: summary)
+            // Blocking rules must exist before the email renders, or images could slip through.
+            if blockRemoteImages { await RemoteContent.prepare() }
             withAnimation(.easeOut(duration: 0.2)) { body_ = loaded }
             shareText = await Task.detached(priority: .utility) {
                 loaded.plainText ?? loaded.html.map(MIME.htmlToText)
