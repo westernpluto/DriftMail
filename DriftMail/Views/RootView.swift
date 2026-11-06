@@ -66,12 +66,22 @@ struct MailSplitView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, columnVisibility == .detailOnly {
-                columnVisibility = .doubleColumn
+                restoreListWithoutAnimation()
             }
         }
         .overlay { NewMailToast() }
         .sheet(item: $store.compose) { context in
             ComposeView(context: context)
+        }
+        .sheet(item: $store.moveRequest) { request in
+            MoveToMailboxSheet(request: request)
+        }
+        // "Show All from Sender": bring the list (with its search) to the front.
+        .onChange(of: store.listRevealRequest) {
+            preferredCompactColumn = .content
+            if horizontalSizeClass == .regular, columnVisibility == .detailOnly {
+                restoreListWithoutAnimation()
+            }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -110,6 +120,17 @@ extension MailSplitView {
     /// On the inner display (regular width), never stay in a message-only layout.
     fileprivate func keepListVisible(sizeClass: UserInterfaceSizeClass?) {
         if sizeClass == .regular, columnVisibility == .detailOnly {
+            restoreListWithoutAnimation()
+        }
+    }
+
+    /// Puts the list back instantly. These corrections undo a layout change the user
+    /// never made, so animating them (the split view's default) showed as the list
+    /// and message sliding across the screen when DriftMail was reopened.
+    fileprivate func restoreListWithoutAnimation() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
             columnVisibility = .doubleColumn
         }
     }

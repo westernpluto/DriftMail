@@ -151,24 +151,83 @@ actor AccountSession {
         }
     }
 
+    // Bulk operations go out in chunks: a sparse set of thousands of UIDs makes a
+    // command line some servers reject.
+    private static func chunks(_ uids: [UInt32]) -> [[UInt32]] {
+        let sorted = uids.sorted()
+        return stride(from: 0, to: sorted.count, by: 400).map { Array(sorted[$0..<min($0 + 400, sorted.count)]) }
+    }
+
     func setFlag(_ flag: String, add: Bool, uids: [UInt32], mailbox: String) async throws {
         try await perform { client in
             _ = try await self.ensureSelected(client, mailbox)
-            try await client.store(uids: uids, add: add, flags: [flag])
+            for chunk in Self.chunks(uids) {
+                try await client.store(uids: chunk, add: add, flags: [flag])
+            }
         }
     }
 
     func move(uids: [UInt32], from mailbox: String, to destination: String) async throws {
         try await perform { client in
             _ = try await self.ensureSelected(client, mailbox)
-            try await client.move(uids: uids, to: destination)
+            for chunk in Self.chunks(uids) {
+                try await client.move(uids: chunk, to: destination)
+            }
         }
     }
 
     func deletePermanently(uids: [UInt32], mailbox: String) async throws {
         try await perform { client in
             _ = try await self.ensureSelected(client, mailbox)
-            try await client.deletePermanently(uids: uids)
+            for chunk in Self.chunks(uids) {
+                try await client.deletePermanently(uids: chunk)
+            }
+        }
+    }
+
+    func markAllSeen(mailbox: String) async throws {
+        try await perform { client in
+            _ = try await self.ensureSelected(client, mailbox)
+            try await client.markAllSeen()
+        }
+    }
+
+    // MARK: Counts and search
+
+    /// Unread counts straight from the server, for every mailbox in `paths`.
+    /// A mailbox the server refuses is skipped rather than failing the rest.
+    func unreadCounts(paths: [String]) async throws -> [String: Int] {
+        try await perform { client in
+            var counts: [String: Int] = [:]
+            for path in paths {
+                if let status = try? await client.status(path) { counts[path] = status.unseen }
+            }
+            return counts
+        }
+    }
+
+    /// Every UID in `mailbox` matching `query` in `fields`, newest first.
+    func search(mailbox: String, query: String, fields: [IMAPClient.SearchField]) async throws -> [UInt32] {
+        try await perform { client in
+            _ = try await self.ensureSelected(client, mailbox)
+            return try await client.search(query, in: fields).sorted(by: >)
+        }
+    }
+
+    /// Summaries (headers + preview) for specific UIDs, e.g. search results.
+    func summaries(mailbox: String, uids: [UInt32]) async throws -> [MessageSummary] {
+        let accountID = account.id
+        return try await perform { client in
+            _ = try await self.ensureSelected(client, mailbox)
+            var summaries: [MessageSummary] = []
+            for start in stride(from: 0, to: uids.count, by: 20) {
+                let chunk = Array(uids[start..<min(start + 20, uids.count)])
+                for item in try await client.fetchPreviews(uids: chunk) {
+                    summaries.append(MIME.summary(from: item.body ?? [], accountID: accountID, mailbox: mailbox,
+                                                  uid: item.uid, flags: item.flags, internalDate: item.internalDate))
+                }
+            }
+            return summaries
         }
     }
 

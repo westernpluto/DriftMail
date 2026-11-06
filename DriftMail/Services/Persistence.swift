@@ -8,6 +8,8 @@ enum Persistence {
         var mailboxes: [String: [Mailbox]] = [:]           // accountID -> mailboxes
         var messages: [String: [MessageSummary]] = [:]     // mailboxKey -> messages
         var highestSeenUID: [String: UInt32] = [:]          // mailboxKey -> highest UID already notified
+        // Optional so snapshots saved by older versions still decode.
+        var unreadCounts: [String: Int]? = nil              // mailboxKey -> server's unread count
     }
 
     private static var directory: URL {

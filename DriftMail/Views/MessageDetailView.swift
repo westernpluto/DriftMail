@@ -245,6 +245,16 @@ struct MessageDetailView: View {
                     Label("Move to Junk", systemImage: "xmark.bin")
                 }
             }
+            Button {
+                store.moveRequest = MoveRequest(messages: [currentSummary])
+            } label: {
+                Label("Move to Folder…", systemImage: "folder")
+            }
+            Button {
+                store.showAll(from: summary.from.address)
+            } label: {
+                Label("Show All from \(summary.from.displayName)", systemImage: "person.crop.circle")
+            }
             if let text = body_?.plainText ?? body_?.html.map(MIME.htmlToText) {
                 ShareLink(item: "\(summary.subject)\n\n\(text)") {
                     Label("Share", systemImage: "square.and.arrow.up")

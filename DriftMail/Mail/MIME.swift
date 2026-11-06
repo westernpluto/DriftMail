@@ -404,11 +404,7 @@ enum MIME {
                         flags: [String], internalDate: Date?) -> MessageSummary {
         let root = parse(bytes)
         let body = extractBody(root)
-        let previewSource = body.plainText.map(stripQuotes) ?? body.html.map(htmlToText) ?? ""
-        let preview = previewSource
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        let preview = previewText(from: body)
         let lowerFlags = flags.map { $0.lowercased() }
         let mixed = root.contentType == "multipart/mixed"
         return MessageSummary(
@@ -421,7 +417,7 @@ enum MIME {
             replyTo: parseAddresses(root.header("reply-to")),
             subject: decodeEncodedWords(root.header("subject") ?? "").trimmingCharacters(in: .whitespaces),
             date: internalDate ?? parseDate(root.header("date")) ?? Date(),
-            preview: String(preview.prefix(240)),
+            preview: preview,
             isSeen: lowerFlags.contains("\\seen"),
             isFlagged: lowerFlags.contains("\\flagged"),
             hasAttachments: mixed || !body.visibleAttachments.isEmpty,
@@ -437,18 +433,76 @@ enum MIME {
 
     static func htmlToText(_ html: String) -> String {
         var text = html
-        for tag in ["style", "script", "head", "title"] {
-            text = text.replacingOccurrences(of: "<\(tag)[^>]*>[\\s\\S]*?</\(tag)>", with: " ",
+        // Comments first (they often wrap CSS for old Outlook), including one cut off
+        // by the 16 KB preview download.
+        text = text.replacingOccurrences(of: "<!--[\\s\\S]*?(-->|$)", with: " ", options: .regularExpression)
+        for tag in ["style", "script", "head", "title", "xml"] {
+            // Whole blocks…
+            text = text.replacingOccurrences(of: "<\(tag)\\b[^>]*>[\\s\\S]*?</\(tag)\\s*>", with: " ",
+                                             options: [.regularExpression, .caseInsensitive])
+            // …and a block whose end was cut off by the preview download: without this
+            // the stylesheet of a large newsletter showed up as the preview text.
+            text = text.replacingOccurrences(of: "<\(tag)\\b[^>]*>[\\s\\S]*$", with: " ",
                                              options: [.regularExpression, .caseInsensitive])
         }
-        text = text.replacingOccurrences(of: "<br\\s*/?>|</p>|</div>|</tr>", with: "\n", options: [.regularExpression, .caseInsensitive])
+        text = text.replacingOccurrences(of: "<br\\s*/?>|</p>|</div>|</tr>|</h[1-6]>|</li>", with: "\n",
+                                         options: [.regularExpression, .caseInsensitive])
         text = text.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-        let entities = ["&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'",
-                        "&apos;": "'", "&zwnj;": "", "&#8203;": "", "&rsquo;": "’", "&lsquo;": "‘",
-                        "&ldquo;": "“", "&rdquo;": "”", "&mdash;": "—", "&ndash;": "–", "&hellip;": "…", "&#847;": ""]
-        for (entity, value) in entities { text = text.replacingOccurrences(of: entity, with: value) }
-        text = text.replacingOccurrences(of: "&#[0-9]+;", with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: "<[^>]*$", with: " ", options: .regularExpression)  // a cut-off tag
+        return decodeEntities(text)
+    }
+
+    /// Decodes HTML entities, and drops the invisible characters newsletters pad
+    /// their preheader with (so previews don't start with blank space).
+    static func decodeEntities(_ input: String) -> String {
+        var text = input
+        // Numeric entities: &#8217; and &#x2019;
+        if let regex = try? NSRegularExpression(pattern: "&#(x[0-9a-fA-F]+|[0-9]+);") {
+            let ns = text as NSString
+            var result = ""
+            var last = 0
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
+                let code = ns.substring(with: match.range(at: 1))
+                let value = code.hasPrefix("x") || code.hasPrefix("X")
+                    ? UInt32(code.dropFirst(), radix: 16) : UInt32(code)
+                if let value, let scalar = Unicode.Scalar(value) { result.unicodeScalars.append(scalar) }
+                last = match.range.location + match.range.length
+            }
+            result += ns.substring(from: last)
+            text = result
+        }
+        let entities = ["&nbsp;": " ", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&apos;": "'",
+                        "&zwnj;": "", "&zwj;": "", "&shy;": "", "&rsquo;": "\u{2019}", "&lsquo;": "\u{2018}",
+                        "&ldquo;": "\u{201C}", "&rdquo;": "\u{201D}", "&mdash;": "\u{2014}", "&ndash;": "\u{2013}",
+                        "&hellip;": "\u{2026}", "&bull;": "\u{2022}", "&middot;": "\u{00B7}", "&copy;": "\u{00A9}",
+                        "&reg;": "\u{00AE}", "&trade;": "\u{2122}", "&euro;": "\u{20AC}", "&pound;": "\u{00A3}"]
+        for (entity, value) in entities {
+            text = text.replacingOccurrences(of: entity, with: value, options: .caseInsensitive)
+        }
+        text = text.replacingOccurrences(of: "&amp;", with: "&", options: .caseInsensitive)  // last
+        // Invisible padding: combining grapheme joiner, zero-width chars, soft hyphen, BOM.
+        let invisible: Set<Unicode.Scalar> = ["\u{034F}", "\u{200B}", "\u{200C}", "\u{200D}", "\u{2060}",
+                                               "\u{00AD}", "\u{FEFF}"]
+        text.unicodeScalars.removeAll { invisible.contains($0) }
         return text
+    }
+
+    /// The one-line preview shown under the subject in the message list.
+    static func previewText(from body: MessageBody) -> String {
+        let source = body.plainText.map(stripQuotes) ?? body.html.map(htmlToText) ?? ""
+        let collapsed = source
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return String(collapsed.prefix(240))
+    }
+
+    /// True for a stored preview that is really markup or CSS (saved before this was fixed).
+    static func looksLikeMarkup(_ preview: String) -> Bool {
+        (preview.contains("{") && preview.contains("}") && preview.contains(":"))
+            || preview.contains("<") && preview.contains(">")
+            || preview.range(of: "&#[0-9x]", options: .regularExpression) != nil
     }
 
     // MARK: Encoding

@@ -161,12 +161,92 @@ final class IMAPClient: @unchecked Sendable {
         return results
     }
 
+    // MARK: Counts and search
+
+    /// The server's own message and unread counts for a mailbox (no download needed).
+    func status(_ mailbox: String) async throws -> (messages: Int, unseen: Int) {
+        var messages = 0
+        var unseen = 0
+        try await run("STATUS \(quote(mailbox)) (MESSAGES UNSEEN)") { untagged in
+            guard untagged.keyword == "STATUS", let items = untagged.values.last?.list else { return }
+            var index = 0
+            while index + 1 < items.count {
+                let value = Int(items[index + 1].text ?? "") ?? 0
+                switch (items[index].text ?? "").uppercased() {
+                case "MESSAGES": messages = value
+                case "UNSEEN": unseen = value
+                default: break
+                }
+                index += 2
+            }
+        }
+        return (messages, unseen)
+    }
+
+    enum SearchField: String, Sendable {
+        case from = "FROM", to = "TO", subject = "SUBJECT", body = "BODY"
+    }
+
+    /// UIDs in the selected mailbox where any of `fields` contains `query`
+    /// (server-side, so it covers every message, not just downloaded ones).
+    func search(_ query: String, in fields: [SearchField]) async throws -> [UInt32] {
+        guard !fields.isEmpty, !query.isEmpty else { return [] }
+        let ascii = query.allSatisfy(\.isASCII)
+        var parts: [CommandPart] = [.text(ascii ? "UID SEARCH" : "UID SEARCH CHARSET UTF-8")]
+        // "OR a b" takes two keys, so n fields need n-1 ORs in front.
+        for _ in 1..<fields.count { parts.append(.text(" OR")) }
+        for field in fields {
+            parts.append(.text(" \(field.rawValue) "))
+            parts.append(ascii ? .text(quote(query)) : .literal(Data(query.utf8)))
+        }
+        var uids: [UInt32] = []
+        try await run(parts: parts) { untagged in
+            guard untagged.keyword == "SEARCH" else { return }
+            uids += untagged.values.compactMap { $0.text.flatMap { UInt32($0) } }
+        }
+        return uids
+    }
+
+    private enum CommandPart {
+        case text(String)
+        case literal(Data)
+    }
+
+    /// Sends a command containing literals ({n} + continuation), e.g. a UTF-8 search term.
+    @discardableResult
+    private func run(parts: [CommandPart], handler: ((IMAPUntagged) -> Void)? = nil) async throws -> String {
+        let tag = nextTag()
+        var pending = "\(tag) "
+        for part in parts {
+            switch part {
+            case .text(let text):
+                pending += text
+            case .literal(let data):
+                try await socket.write(pending + "{\(data.count)}\r\n")
+                pending = ""
+                while true {
+                    let response = try await readResponse()
+                    if case .continuation = response { break }
+                    if case .tagged(_, _, let text) = response { throw MailError.server(text) }
+                }
+                try await socket.write(data)
+            }
+        }
+        try await socket.write(pending + "\r\n")
+        return try await waitForTag(tag, handler: handler)
+    }
+
     // MARK: Changing messages
 
     func store(uids: [UInt32], add: Bool, flags: [String]) async throws {
         guard !uids.isEmpty else { return }
         let op = add ? "+FLAGS.SILENT" : "-FLAGS.SILENT"
         try await run("UID STORE \(IMAPClient.uidSet(uids)) \(op) (\(flags.joined(separator: " ")))")
+    }
+
+    /// Marks every message in the selected mailbox as read, downloaded or not.
+    func markAllSeen() async throws {
+        try await run("UID STORE 1:* +FLAGS.SILENT (\\Seen)")
     }
 
     func move(uids: [UInt32], to destination: String) async throws {

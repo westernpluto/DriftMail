@@ -18,6 +18,20 @@ final class MailStore {
     var mailboxes: [UUID: [Mailbox]] = [:]
     var messagesByMailbox: [String: [MessageSummary]] = [:]
     var totalCounts: [String: Int] = [:]
+    /// The server's unread count per mailbox (IMAP STATUS), so counts cover every
+    /// message, not only the ones downloaded. Keyed like `messagesByMailbox`.
+    var unreadCounts: [String: Int] = [:]
+
+    /// Server-side search results for the message list's search field.
+    var serverSearch: ServerSearch?
+    var isSearchingServer = false
+    /// "Show All from Sender": asks the message list to search for this address.
+    var senderSearchRequest: SenderSearchRequest?
+    /// Bumped to bring the message list to the front (outer display), e.g. for a sender search.
+    var listRevealRequest = 0
+    /// Messages waiting for a destination in the Move to Folder sheet.
+    var moveRequest: MoveRequest?
+    @ObservationIgnored private var searchGeneration = 0
 
     var selection: MailboxSelection? = .unifiedInbox
     var selectedMessageID: MessageSummary.ID?
@@ -47,6 +61,7 @@ final class MailStore {
         })
         messagesByMailbox = snapshot.messages
         highestSeenUID = snapshot.highestSeenUID
+        unreadCounts = snapshot.unreadCounts ?? [:]
         shareAccountsWithExtension()
     }
 
@@ -69,6 +84,7 @@ final class MailStore {
         // Keep the cache small: only the newest messages per mailbox.
         snapshot.messages = messagesByMailbox.mapValues { Array($0.prefix(200)) }
         snapshot.highestSeenUID = highestSeenUID
+        snapshot.unreadCounts = unreadCounts
         Persistence.save(snapshot)
     }
 
@@ -120,11 +136,36 @@ final class MailStore {
         for list in messagesByMailbox.values {
             if let found = list.first(where: { $0.id == id }) { return found }
         }
-        return nil
+        // Search results can be older messages that were never downloaded into a list.
+        return serverSearch?.results.first { $0.id == id }
     }
 
+    /// Unread messages on the server; falls back to the downloaded ones until the
+    /// first count arrives.
     func unreadCount(_ selection: MailboxSelection) -> Int {
-        messages(for: selection).filter { !$0.isSeen }.count
+        switch selection {
+        case .unifiedInbox:
+            return accounts.reduce(0) { $0 + unreadCount(.mailbox(inbox(for: $1.id))) }
+        case .mailbox(let box):
+            return unreadCounts[box.id] ?? (messagesByMailbox[box.id] ?? []).filter { !$0.isSeen }.count
+        }
+    }
+
+    /// Keeps the server count in step with a change made here, until the next refresh.
+    private func adjustUnread(_ mailboxKey: String, by delta: Int) {
+        guard delta != 0, let count = unreadCounts[mailboxKey] else { return }
+        unreadCounts[mailboxKey] = max(0, count + delta)
+    }
+
+    /// Fetches the server's unread count for every mailbox of an account.
+    func refreshUnreadCounts(for account: MailAccount) async {
+        let boxes = (mailboxes[account.id] ?? []).filter(\.selectable)
+        guard !boxes.isEmpty,
+              let counts = try? await session(for: account).unreadCounts(paths: boxes.map(\.path)) else { return }
+        for box in boxes {
+            if let count = counts[box.path] { unreadCounts[box.id] = count }
+        }
+        save()
     }
 
     func isRefreshing(_ selection: MailboxSelection?) -> Bool {
@@ -222,6 +263,7 @@ final class MailStore {
         }
         await refresh(.unifiedInbox)
         if case .mailbox = selection { await refresh(selection) }
+        for account in accounts { await refreshUnreadCounts(for: account) }
     }
 
     /// Refreshes the newest page of a mailbox and returns messages that are new since the last check.
@@ -233,15 +275,20 @@ final class MailStore {
         defer { refreshing.remove(box.id) }
 
         let existing = messagesByMailbox[box.id] ?? []
-        let known = Set(existing.map(\.uid))
+        // Previews saved while markup still leaked into them (CSS etc.) are fetched again.
+        let needsRepair = Set(existing.filter { MIME.looksLikeMarkup($0.preview) }.map(\.uid))
+        let known = Set(existing.map(\.uid)).subtracting(needsRepair)
         do {
             let result = try await session(for: account).page(mailbox: box.path, offset: 0, limit: Self.pageSize, known: known)
             totalCounts[box.id] = result.totalCount
             let pageUIDs = Set(result.flags.keys)
             let lowestInPage = pageUIDs.min() ?? 0
+            var replacements = Dictionary(result.newSummaries.map { ($0.uid, $0) }, uniquingKeysWith: { a, _ in a })
             var merged: [MessageSummary] = []
             for var message in existing {
-                if let flags = result.flags[message.uid] {
+                if let repaired = replacements.removeValue(forKey: message.uid) {
+                    merged.append(repaired)
+                } else if let flags = result.flags[message.uid] {
                     let lower = flags.map { $0.lowercased() }
                     message.isSeen = lower.contains("\\seen")
                     message.isFlagged = lower.contains("\\flagged")
@@ -252,14 +299,17 @@ final class MailStore {
                 }
                 // Otherwise the message was deleted or moved elsewhere.
             }
-            merged.append(contentsOf: result.newSummaries)
+            merged.append(contentsOf: result.newSummaries.filter { replacements[$0.uid] != nil })
             merged.sort { $0.date > $1.date }
             messagesByMailbox[box.id] = merged
             errorMessage = nil
 
             let previousHighest = highestSeenUID[box.id] ?? 0
-            let fresh = result.newSummaries.filter { $0.uid > previousHighest && !$0.isSeen }
+            let fresh = result.newSummaries.filter { $0.uid > previousHighest && !$0.isSeen && !needsRepair.contains($0.uid) }
             if let maxUID = pageUIDs.max(), maxUID > previousHighest { highestSeenUID[box.id] = maxUID }
+            if let count = try? await session(for: account).unreadCounts(paths: [box.path])[box.path] {
+                unreadCounts[box.id] = count
+            }
             save()
             return previousHighest == 0 ? [] : fresh
         } catch {
@@ -307,20 +357,32 @@ final class MailStore {
         }
         let body = await Task.detached(priority: .userInitiated) { MIME.extractBody(MIME.parse(raw)) }.value
         bodyCache[summary.id] = body
+        // The list preview came from the first 16 KB only; the full message gives the real one.
+        let preview = MIME.previewText(from: body)
+        if !preview.isEmpty, preview != summary.preview {
+            update(summary) { $0.preview = preview }
+            save()
+        }
         return body
     }
 
     // MARK: Actions (optimistic)
 
     private func update(_ summary: MessageSummary, _ change: (inout MessageSummary) -> Void) {
-        guard var list = messagesByMailbox[summary.mailboxKey],
-              let index = list.firstIndex(where: { $0.id == summary.id }) else { return }
-        change(&list[index])
-        messagesByMailbox[summary.mailboxKey] = list
+        if var list = messagesByMailbox[summary.mailboxKey],
+           let index = list.firstIndex(where: { $0.id == summary.id }) {
+            change(&list[index])
+            messagesByMailbox[summary.mailboxKey] = list
+        }
+        if let index = serverSearch?.results.firstIndex(where: { $0.id == summary.id }) {
+            change(&serverSearch!.results[index])
+        }
     }
 
     private func removeLocally(_ summary: MessageSummary) {
+        if !summary.isSeen { adjustUnread(summary.mailboxKey, by: -1) }
         messagesByMailbox[summary.mailboxKey]?.removeAll { $0.id == summary.id }
+        serverSearch?.remove([summary.uid], from: summary.mailboxKey)
         if selectedMessageID == summary.id { selectedMessageID = nil }
         save()
     }
@@ -328,12 +390,14 @@ final class MailStore {
     func setSeen(_ summary: MessageSummary, _ seen: Bool) {
         guard summary.isSeen != seen, let account = account(summary.accountID) else { return }
         update(summary) { $0.isSeen = seen }
+        adjustUnread(summary.mailboxKey, by: seen ? -1 : 1)
         save()
         Task {
             do {
                 try await session(for: account).setFlag("\\Seen", add: seen, uids: [summary.uid], mailbox: summary.mailboxPath)
             } catch {
                 update(summary) { $0.isSeen = !seen }
+                adjustUnread(summary.mailboxKey, by: seen ? 1 : -1)
                 report(error, account: account)
             }
         }
@@ -522,5 +586,267 @@ final class MailStore {
     private func report(_ error: Error, account: MailAccount) {
         if error is CancellationError { return }
         errorMessage = "\(account.email): \(error.localizedDescription)"
+    }
+}
+
+// MARK: - Server search
+
+enum SearchScope: String, CaseIterable, Hashable, Sendable {
+    case all, from, subject
+
+    var title: String {
+        switch self {
+        case .all: "All"
+        case .from: "From"
+        case .subject: "Subject"
+        }
+    }
+
+    var fields: [IMAPClient.SearchField] {
+        switch self {
+        case .all: [.from, .to, .subject]
+        case .from: [.from]
+        case .subject: [.subject]
+        }
+    }
+}
+
+/// Every message on the server matching a search, not only the downloaded ones.
+struct ServerSearch: Equatable {
+    var query: String
+    var scope: SearchScope
+    var selection: MailboxSelection
+    /// All matching UIDs per mailbox (key: `Mailbox.id`), newest first.
+    var matches: [String: [UInt32]]
+    var boxes: [String: Mailbox]
+    /// The matches downloaded so far (headers + preview), newest first.
+    var results: [MessageSummary] = []
+    var loadedCount: [String: Int] = [:]
+
+    var total: Int { matches.values.reduce(0) { $0 + $1.count } }
+    var canLoadMore: Bool { matches.contains { key, uids in (loadedCount[key] ?? 0) < uids.count } }
+
+    func isFor(_ query: String, _ scope: SearchScope, _ selection: MailboxSelection) -> Bool {
+        self.query == query.trimmingCharacters(in: .whitespaces) && self.scope == scope && self.selection == selection
+    }
+
+    mutating func remove(_ uids: Set<UInt32>, from mailboxKey: String) {
+        guard !uids.isEmpty else { return }
+        let removedBefore = (matches[mailboxKey] ?? []).prefix(loadedCount[mailboxKey] ?? 0).filter { uids.contains($0) }.count
+        matches[mailboxKey]?.removeAll { uids.contains($0) }
+        if let loaded = loadedCount[mailboxKey] { loadedCount[mailboxKey] = loaded - removedBefore }
+        results.removeAll { $0.mailboxKey == mailboxKey && uids.contains($0.uid) }
+    }
+}
+
+struct MoveRequest: Identifiable {
+    let id = UUID()
+    var messages: [MessageSummary]
+}
+
+struct SenderSearchRequest: Equatable {
+    var id = UUID()
+    var address: String
+}
+
+enum BulkAction {
+    case markRead, archive, trash
+}
+
+extension MailStore {
+    private static let searchPage = 100
+
+    /// Searches the server (the selected mailbox, or every inbox for All Inboxes).
+    func searchServer(_ query: String, scope: SearchScope, in selection: MailboxSelection) async {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        searchGeneration += 1
+        let generation = searchGeneration
+        guard !trimmed.isEmpty else {
+            serverSearch = nil
+            isSearchingServer = false
+            return
+        }
+        isSearchingServer = true
+        defer { if generation == searchGeneration { isSearchingServer = false } }
+
+        let boxes: [Mailbox]
+        switch selection {
+        case .unifiedInbox: boxes = accounts.map { inbox(for: $0.id) }
+        case .mailbox(let box): boxes = [box]
+        }
+        var search = ServerSearch(query: trimmed, scope: scope, selection: selection, matches: [:], boxes: [:])
+        for box in boxes {
+            guard let account = account(box.accountID) else { continue }
+            do {
+                search.matches[box.id] = try await session(for: account).search(mailbox: box.path, query: trimmed,
+                                                                                fields: scope.fields)
+                search.boxes[box.id] = box
+            } catch {
+                report(error, account: account)
+            }
+            if generation != searchGeneration { return }  // a newer search started
+        }
+        await loadResults(&search)
+        if generation == searchGeneration { serverSearch = search }
+    }
+
+    func loadMoreSearchResults() async {
+        guard var search = serverSearch, search.canLoadMore else { return }
+        let generation = searchGeneration
+        await loadResults(&search)
+        if generation == searchGeneration { serverSearch = search }
+    }
+
+    private func loadResults(_ search: inout ServerSearch) async {
+        let perBox = max(20, Self.searchPage / max(1, search.matches.count))
+        for (key, uids) in search.matches {
+            let start = search.loadedCount[key] ?? 0
+            guard start < uids.count, let box = search.boxes[key], let account = account(box.accountID) else { continue }
+            let next = Array(uids[start..<min(start + perBox, uids.count)])
+            do {
+                let fetched = try await session(for: account).summaries(mailbox: box.path, uids: next)
+                search.results += fetched
+                search.loadedCount[key] = start + next.count
+            } catch {
+                report(error, account: account)
+            }
+        }
+        search.results.sort { $0.date > $1.date }
+    }
+
+    /// Applies an action to every match of the current search on the server,
+    /// including the ones never downloaded, then searches again.
+    func applyToAllMatches(_ action: BulkAction) async {
+        guard let search = serverSearch else { return }
+        for (key, uids) in search.matches where !uids.isEmpty {
+            guard let box = search.boxes[key], let account = account(box.accountID) else { continue }
+            await apply(action, uids: uids, in: box, account: account)
+        }
+        await searchServer(search.query, scope: search.scope, in: search.selection)
+    }
+
+    /// The selected messages (select mode in the list), grouped per mailbox.
+    func apply(_ action: BulkAction, to messages: [MessageSummary]) async {
+        for (key, group) in Dictionary(grouping: messages, by: \.mailboxKey) {
+            guard let first = group.first, let account = account(first.accountID) else { continue }
+            let box = mailboxes[account.id]?.first { $0.id == key }
+                ?? Mailbox(accountID: account.id, path: first.mailboxPath, name: "", role: .other)
+            await apply(action, uids: group.map(\.uid), in: box, account: account)
+        }
+    }
+
+    /// Lists every message from `address` (server search in the current mailbox).
+    func showAll(from address: String) {
+        senderSearchRequest = SenderSearchRequest(address: address)
+        listRevealRequest += 1
+    }
+
+    /// Marks everything in the mailbox (or every inbox) as read on the server.
+    func markAllRead(in selection: MailboxSelection) async {
+        let boxes: [Mailbox]
+        switch selection {
+        case .unifiedInbox: boxes = accounts.map { inbox(for: $0.id) }
+        case .mailbox(let box): boxes = [box]
+        }
+        for box in boxes {
+            guard let account = account(box.accountID) else { continue }
+            for message in messagesByMailbox[box.id] ?? [] where !message.isSeen {
+                update(message) { $0.isSeen = true }
+            }
+            unreadCounts[box.id] = 0
+            do {
+                try await session(for: account).markAllSeen(mailbox: box.path)
+            } catch {
+                report(error, account: account)
+                await refreshMailbox(box)
+            }
+        }
+        save()
+    }
+
+    func setFlagged(_ messages: [MessageSummary], _ flagged: Bool) async {
+        for (key, group) in Dictionary(grouping: messages, by: \.mailboxKey) {
+            guard let first = group.first, let account = account(first.accountID) else { continue }
+            for message in group { update(message) { $0.isFlagged = flagged } }
+            do {
+                try await session(for: account).setFlag("\\Flagged", add: flagged, uids: group.map(\.uid),
+                                                         mailbox: first.mailboxPath)
+            } catch {
+                report(error, account: account)
+                if let box = mailboxes[account.id]?.first(where: { $0.id == key }) { await refreshMailbox(box) }
+            }
+        }
+        save()
+    }
+
+    func setSeen(_ messages: [MessageSummary], _ seen: Bool) async {
+        for (_, group) in Dictionary(grouping: messages.filter { $0.isSeen != seen }, by: \.mailboxKey) {
+            guard let first = group.first, let account = account(first.accountID) else { continue }
+            for message in group { update(message) { $0.isSeen = seen } }
+            adjustUnread(first.mailboxKey, by: seen ? -group.count : group.count)
+            do {
+                try await session(for: account).setFlag("\\Seen", add: seen, uids: group.map(\.uid),
+                                                         mailbox: first.mailboxPath)
+            } catch {
+                report(error, account: account)
+            }
+        }
+        save()
+    }
+
+    /// Moves messages of one account to `target` (Move to Folder).
+    func move(_ messages: [MessageSummary], to target: Mailbox) async {
+        let movable = messages.filter { $0.accountID == target.accountID && $0.mailboxPath != target.path }
+        guard let account = account(target.accountID) else { return }
+        for (_, group) in Dictionary(grouping: movable, by: \.mailboxKey) {
+            guard let first = group.first else { continue }
+            for message in group { removeLocally(message) }
+            do {
+                try await session(for: account).move(uids: group.map(\.uid), from: first.mailboxPath, to: target.path)
+            } catch {
+                report(error, account: account)
+            }
+        }
+        messagesByMailbox[target.id] = nil  // refetch the destination next time
+        await refreshUnreadCounts(for: account)
+    }
+
+    private func apply(_ action: BulkAction, uids: [UInt32], in box: Mailbox, account: MailAccount) async {
+        let uidSet = Set(uids)
+        let imap = session(for: account)
+        do {
+            switch action {
+            case .markRead:
+                try await imap.setFlag("\\Seen", add: true, uids: uids, mailbox: box.path)
+                for message in (messagesByMailbox[box.id] ?? []) + (serverSearch?.results ?? [])
+                where message.mailboxKey == box.id && uidSet.contains(message.uid) {
+                    update(message) { $0.isSeen = true }
+                }
+            case .archive:
+                guard let target = archiveMailbox(for: account.id), target.path != box.path else { return }
+                try await imap.move(uids: uids, from: box.path, to: target.path)
+                messagesByMailbox[target.id] = nil
+            case .trash:
+                if let trash = mailbox(.trash, for: account.id), trash.path != box.path {
+                    try await imap.move(uids: uids, from: box.path, to: trash.path)
+                    messagesByMailbox[trash.id] = nil
+                } else {
+                    try await imap.deletePermanently(uids: uids, mailbox: box.path)
+                }
+            }
+            if action != .markRead {
+                messagesByMailbox[box.id]?.removeAll { uidSet.contains($0.uid) }
+                serverSearch?.remove(uidSet, from: box.id)
+                if let selected = selectedMessageID, selected.hasPrefix(box.id + "|"),
+                   let uid = selected.split(separator: "|").last.flatMap({ UInt32($0) }), uidSet.contains(uid) {
+                    selectedMessageID = nil
+                }
+            }
+        } catch {
+            report(error, account: account)
+        }
+        // The server is the source of truth for what's left and the unread count.
+        await refreshMailbox(box)
+        save()
     }
 }
