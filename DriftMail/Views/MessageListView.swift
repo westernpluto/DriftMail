@@ -29,7 +29,7 @@ struct MessageListView: View {
             if !query.isEmpty { list = list.filter(matchesLocally) }
         }
         if unreadOnly { list = list.filter { !$0.isSeen } }
-        return list
+        return list.uniquedByID()
     }
 
     private func matchesLocally(_ message: MessageSummary) -> Bool {
@@ -372,6 +372,7 @@ struct MessageListView: View {
 
     private var subtitle: String {
         if store.isRefreshing(selection) { return String(localized: "Checking for mail…") }
+        if let issue = store.connectionIssue { return "\(issue) \u{00B7} retrying" }
         let unread = store.unreadCount(selection)
         let count = unread > 0 ? unread.formatted() : ""
         if store.liveAccounts.isEmpty == false {

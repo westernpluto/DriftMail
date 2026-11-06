@@ -11,6 +11,8 @@ struct MessageDetailView: View {
     @State private var htmlHeight: CGFloat = 200
     @State private var showDetails = false
     @State private var previewURL: URL?
+    /// Plain text for Share, made once in the background (not on every redraw).
+    @State private var shareText: String?
 
     var body: some View {
         ScrollView {
@@ -255,7 +257,7 @@ struct MessageDetailView: View {
             } label: {
                 Label("Show All from \(summary.from.displayName)", systemImage: "person.crop.circle")
             }
-            if let text = body_?.plainText ?? body_?.html.map(MIME.htmlToText) {
+            if let text = shareText {
                 ShareLink(item: "\(summary.subject)\n\n\(text)") {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
@@ -271,6 +273,9 @@ struct MessageDetailView: View {
         do {
             let loaded = try await store.body(for: summary)
             withAnimation(.easeOut(duration: 0.2)) { body_ = loaded }
+            shareText = await Task.detached(priority: .utility) {
+                loaded.plainText ?? loaded.html.map(MIME.htmlToText)
+            }.value
             store.setSeen(currentSummary, true)
         } catch {
             loadError = error.localizedDescription

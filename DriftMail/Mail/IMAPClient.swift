@@ -139,6 +139,7 @@ final class IMAPClient: @unchecked Sendable {
 
     private func fetch(_ command: String) async throws -> [IMAPFetchResult] {
         var results: [IMAPFetchResult] = []
+        var indexByUID: [UInt32: Int] = [:]
         try await run(command) { untagged in
             guard untagged.keyword == "FETCH", let seq = untagged.number,
                   let items = untagged.values.first?.list else { return }
@@ -156,7 +157,18 @@ final class IMAPClient: @unchecked Sendable {
                 }
                 index += 2
             }
-            if result.uid != 0 { results.append(result) }
+            guard result.uid != 0 else { return }
+            // Servers also send unrequested FETCH lines (e.g. another app just marked a
+            // message read). Merge them into one result per message: a second entry for
+            // the same message became a duplicate row, which can crash a SwiftUI List.
+            if let index = indexByUID[result.uid] {
+                if result.body != nil { results[index].body = result.body }
+                if !result.flags.isEmpty { results[index].flags = result.flags }
+                if result.internalDate != nil { results[index].internalDate = result.internalDate }
+            } else {
+                indexByUID[result.uid] = results.count
+                results.append(result)
+            }
         }
         return results
     }

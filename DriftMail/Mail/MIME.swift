@@ -266,6 +266,10 @@ enum MIME {
     }
 
     /// Decodes RFC 2047 encoded words such as `=?UTF-8?B?...?=`.
+    ///
+    /// Adjacent encoded words in the same charset are joined as bytes before decoding:
+    /// many senders split a long subject in the middle of a multi-byte character such
+    /// as an emoji, and decoding each word on its own turned those halves into "?".
     static func decodeEncodedWords(_ input: String) -> String {
         guard input.contains("=?") else { return input }
         let pattern = #"=\?([^?]+)\?([bBqQ])\?([^?]*)\?="#
@@ -273,23 +277,37 @@ enum MIME {
         let ns = input as NSString
         var result = ""
         var last = 0
-        var previousWasWord = false
+        var pending = Data()
+        var pendingCharset: String?
+
+        func flush() {
+            if !pending.isEmpty { result += string(from: pending, charset: pendingCharset) }
+            pending = Data()
+            pendingCharset = nil
+        }
+
         for match in regex.matches(in: input, range: NSRange(location: 0, length: ns.length)) {
             let between = ns.substring(with: NSRange(location: last, length: match.range.location - last))
-            // Whitespace between two encoded words is dropped.
-            if !(previousWasWord && between.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
-                result += between
-            }
-            let charset = ns.substring(with: match.range(at: 1)).components(separatedBy: "*").first
+            let charset = ns.substring(with: match.range(at: 1)).components(separatedBy: "*").first?.lowercased()
             let mode = ns.substring(with: match.range(at: 2)).uppercased()
             let text = ns.substring(with: match.range(at: 3))
             let data = mode == "B"
                 ? decodeBase64(Array(text.utf8))
                 : decodeQuotedPrintable(Array(text.utf8), underscoreIsSpace: true)
-            result += string(from: data, charset: charset)
+
+            // Whitespace between two encoded words is dropped; anything else ends the run.
+            let adjacent = !pending.isEmpty && between.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if adjacent && charset == pendingCharset {
+                pending.append(data)
+            } else {
+                flush()
+                if !adjacent { result += between }
+                pending = data
+                pendingCharset = charset
+            }
             last = match.range.location + match.range.length
-            previousWasWord = true
         }
+        flush()
         result += ns.substring(from: last)
         return result
     }
@@ -489,13 +507,31 @@ enum MIME {
     }
 
     /// The one-line preview shown under the subject in the message list.
+    ///
+    /// Built from the HTML version first, as Apple Mail does: the plain-text version of
+    /// marketing mail is often just text with raw links, and some senders' plain parts
+    /// even contain leftover MIME headers. Plain text is the fallback.
     static func previewText(from body: MessageBody) -> String {
-        let source = body.plainText.map(stripQuotes) ?? body.html.map(htmlToText) ?? ""
-        let collapsed = source
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        return String(collapsed.prefix(240))
+        // Only the start matters for a preview; capping keeps huge HTML fast.
+        let fromHTML = body.html.map { cleanPreview(htmlToText(String($0.prefix(300_000)))) } ?? ""
+        let text = fromHTML.isEmpty ? (body.plainText.map { cleanPreview(stripQuotes(String($0.prefix(100_000)))) } ?? "") : fromHTML
+        return String(text.prefix(240))
+    }
+
+    private static func cleanPreview(_ text: String) -> String {
+        var t = text
+        // MIME header lines that leaked into the text.
+        t = t.replacingOccurrences(of: "(?m)^[ \\t]*(Content-[A-Za-z-]+|MIME-Version):[^\\n]*$", with: " ",
+                                   options: [.regularExpression, .caseInsensitive])
+        // Links: "<https://…>", "(https://…)" and bare URLs.
+        t = t.replacingOccurrences(of: "[<(\\[](https?|mailto):[^>)\\]\\s]*[>)\\]]?", with: " ",
+                                   options: [.regularExpression, .caseInsensitive])
+        t = t.replacingOccurrences(of: "\\b(https?://|www\\.)\\S+", with: " ",
+                                   options: [.regularExpression, .caseInsensitive])
+        // "[image: Logo]" placeholders and divider lines.
+        t = t.replacingOccurrences(of: "\\[image:[^\\]]*\\]", with: " ", options: [.regularExpression, .caseInsensitive])
+        t = t.replacingOccurrences(of: "[-_=*~|#]{3,}", with: " ", options: .regularExpression)
+        return t.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     /// True for a stored preview that is really markup or CSS (saved before this was fixed).
@@ -503,6 +539,8 @@ enum MIME {
         (preview.contains("{") && preview.contains("}") && preview.contains(":"))
             || preview.contains("<") && preview.contains(">")
             || preview.range(of: "&#[0-9x]", options: .regularExpression) != nil
+            || preview.range(of: "Content-(Type|Transfer-Encoding):|https?://", options: [.regularExpression, .caseInsensitive]) != nil
+            || preview.contains("\u{FFFD}")
     }
 
     // MARK: Encoding

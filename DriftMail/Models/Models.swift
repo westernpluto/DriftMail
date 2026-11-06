@@ -186,3 +186,12 @@ enum MailError: LocalizedError {
         }
     }
 }
+
+extension Array where Element: Identifiable {
+    /// Keeps the first element for each ID. Lists must never show two rows with the
+    /// same ID (SwiftUI's List can crash on duplicates).
+    func uniquedByID() -> [Element] {
+        var seen = Set<Element.ID>()
+        return filter { seen.insert($0.id).inserted }
+    }
+}

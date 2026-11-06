@@ -43,10 +43,28 @@ enum Theme {
 struct AvatarView: View {
     var address: EmailAddress
     var size: CGFloat = 40
+    @AppStorage(SenderLogos.enabledKey) private var showLogos = true
 
     var body: some View {
+        // Reading the shared cache here also redraws the avatar when its logo arrives.
+        let logo = showLogos ? SenderLogos.shared.cachedLogo(for: address.address) : nil
+        Group {
+            if let logo {
+                logoView(logo)
+            } else {
+                initials
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+        .task(id: showLogos ? address.address : "") {
+            if showLogos { await SenderLogos.shared.load(for: address.address) }
+        }
+    }
+
+    private var initials: some View {
         let color = Theme.color(for: address.address)
-        ZStack {
+        return ZStack {
             Circle().fill(
                 LinearGradient(colors: [color.opacity(0.95), color.opacity(0.65)],
                                startPoint: .topLeading, endPoint: .bottomTrailing))
@@ -54,8 +72,23 @@ struct AvatarView: View {
                 .font(.system(size: size * 0.38, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
         }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+    }
+
+    /// Business logos in a rounded square, as Apple Mail shows them. Small favicons
+    /// sit centered on white instead of being stretched blurry.
+    private func logoView(_ image: UIImage) -> some View {
+        let sharp = image.size.width * image.scale >= 64
+        let shape = RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+        return ZStack {
+            shape.fill(.white)
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: sharp ? size : size * 0.6, height: sharp ? size : size * 0.6)
+        }
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(.quaternary, lineWidth: 0.5))
     }
 }
 

@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var addProvider: MailProvider?
     @State private var editing: MailAccount?
     @State private var confirmRemove: MailAccount?
+    @AppStorage(SenderLogos.enabledKey) private var showSenderLogos = true
 
     var body: some View {
         NavigationStack {
@@ -47,6 +48,19 @@ struct SettingsView: View {
                     } label: {
                         Label("Add Account", systemImage: "plus.circle.fill")
                     }
+                }
+
+                Section {
+                    Toggle(isOn: $showSenderLogos) {
+                        Label("Sender Logos", systemImage: "building.2.crop.circle")
+                    }
+                } header: {
+                    Text("Message List")
+                } footer: {
+                    Text("Shows a company's logo instead of initials. DriftMail downloads it from the sender's own website (never a third-party service) and keeps it on this phone. Personal addresses such as Gmail or iCloud always show initials.")
+                }
+                .onChange(of: showSenderLogos) { _, on in
+                    if !on { SenderLogos.shared.clearCache() }
                 }
 
                 Section {

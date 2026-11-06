@@ -41,6 +41,11 @@ final class MailStore {
 
     var refreshing: Set<String> = []
     var errorMessage: String?
+    /// A temporary network problem (shown quietly in the list, retried automatically)
+    /// rather than an alert, e.g. the first try right after returning to the app.
+    var connectionIssue: String?
+    @ObservationIgnored private var retryTask: Task<Void, Never>?
+    @ObservationIgnored private var retryAttempt = 0
     var liveAccounts: Set<UUID> = []
     var banner: NewMailBanner?
     var compose: ComposeContext?
@@ -59,7 +64,7 @@ final class MailStore {
         mailboxes = Dictionary(uniqueKeysWithValues: snapshot.mailboxes.compactMap { key, value in
             UUID(uuidString: key).map { ($0, value) }
         })
-        messagesByMailbox = snapshot.messages
+        messagesByMailbox = snapshot.messages.mapValues { $0.uniquedByID() }
         highestSeenUID = snapshot.highestSeenUID
         unreadCounts = snapshot.unreadCounts ?? [:]
         shareAccountsWithExtension()
@@ -301,8 +306,9 @@ final class MailStore {
             }
             merged.append(contentsOf: result.newSummaries.filter { replacements[$0.uid] != nil })
             merged.sort { $0.date > $1.date }
-            messagesByMailbox[box.id] = merged
+            messagesByMailbox[box.id] = merged.uniquedByID()
             errorMessage = nil
+            connectionRecovered()
 
             let previousHighest = highestSeenUID[box.id] ?? 0
             let fresh = result.newSummaries.filter { $0.uid > previousHighest && !$0.isSeen && !needsRepair.contains($0.uid) }
@@ -328,7 +334,7 @@ final class MailStore {
             let result = try await session(for: account).page(mailbox: box.path, offset: existing.count,
                                                               limit: Self.pageSize, known: Set(existing.map(\.uid)))
             totalCounts[box.id] = result.totalCount
-            messagesByMailbox[box.id] = (existing + result.newSummaries).sorted { $0.date > $1.date }
+            messagesByMailbox[box.id] = (existing + result.newSummaries).uniquedByID().sorted { $0.date > $1.date }
             save()
         } catch {
             report(error, account: account)
@@ -355,10 +361,14 @@ final class MailStore {
             raw = try await session(for: account).rawMessage(mailbox: summary.mailboxPath, uid: summary.uid)
             Persistence.cacheRawMessage(raw, id: summary.id)
         }
-        let body = await Task.detached(priority: .userInitiated) { MIME.extractBody(MIME.parse(raw)) }.value
+        // Parsing and preview text stay off the main thread: a very large HTML email
+        // could otherwise freeze the app long enough for iOS to stop it.
+        let (body, preview) = await Task.detached(priority: .userInitiated) { () -> (MessageBody, String) in
+            let body = MIME.extractBody(MIME.parse(raw))
+            return (body, MIME.previewText(from: body))
+        }.value
         bodyCache[summary.id] = body
         // The list preview came from the first 16 KB only; the full message gives the real one.
-        let preview = MIME.previewText(from: body)
         if !preview.isEmpty, preview != summary.preview {
             update(summary) { $0.preview = preview }
             save()
@@ -484,6 +494,9 @@ final class MailStore {
 
     func stopLive() {
         liveEnabled = false
+        retryTask?.cancel()
+        retryTask = nil
+        retryAttempt = 0
         for id in Array(liveTasks.keys) { stopLive(for: id) }
     }
 
@@ -585,7 +598,46 @@ final class MailStore {
 
     private func report(_ error: Error, account: MailAccount) {
         if error is CancellationError { return }
+        if Self.isTransient(error) {
+            connectionIssue = "Can\u{2019}t reach the mail server"
+            scheduleRetry()
+            return
+        }
         errorMessage = "\(account.email): \(error.localizedDescription)"
+    }
+
+    /// Network hiccups that usually fix themselves (no connection yet after waking,
+    /// a dropped or timed-out connection). Sign-in and server errors are not transient.
+    private static func isTransient(_ error: Error) -> Bool {
+        if let mail = error as? MailError {
+            switch mail {
+            case .connectionClosed, .timeout: return true
+            default: return false
+            }
+        }
+        if error is URLError { return true }
+        let domain = (error as NSError).domain
+        return domain == NSURLErrorDomain || domain == NSPOSIXErrorDomain || domain == "kCFErrorDomainCFNetwork"
+    }
+
+    /// Tries again after 3, 6, 12… seconds (up to 30) while the app is open.
+    private func scheduleRetry() {
+        guard retryTask == nil, liveEnabled else { return }
+        retryAttempt += 1
+        let delay = min(30.0, 3.0 * pow(2.0, Double(retryAttempt - 1)))
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.retryTask = nil
+            await self.refresh(self.selection ?? .unifiedInbox)
+        }
+    }
+
+    private func connectionRecovered() {
+        connectionIssue = nil
+        retryAttempt = 0
+        retryTask?.cancel()
+        retryTask = nil
     }
 }
 
@@ -711,7 +763,7 @@ extension MailStore {
                 report(error, account: account)
             }
         }
-        search.results.sort { $0.date > $1.date }
+        search.results = search.results.uniquedByID().sorted { $0.date > $1.date }
     }
 
     /// Applies an action to every match of the current search on the server,
