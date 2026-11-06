@@ -21,6 +21,10 @@ struct HTMLView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.scrollView.isScrollEnabled = false
         webView.scrollView.bounces = false
+        // Render email as designed for light mode, like Apple Mail does here. In Dark Mode
+        // the web view otherwise reports `prefers-color-scheme: dark`, and emails with
+        // their own dark styles could turn into dark text on a black, empty-looking card.
+        webView.overrideUserInterfaceStyle = .light
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
@@ -38,13 +42,17 @@ struct HTMLView: UIViewRepresentable {
     }
 
     private static func wrap(_ html: String) -> String {
-        """
+        // Newsletters (table layouts) go edge to edge, as in Apple Mail; simple text
+        // emails get normal reading margins.
+        let isLayout = html.range(of: "<table", options: .caseInsensitive) != nil
+        let padding = isLayout ? "0" : "16px"
+        return """
         <!doctype html><html><head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="color-scheme" content="light">
         <style>
           html, body { margin: 0; padding: 0; background: #ffffff; }
-          body { font: -apple-system-body; color: #1c1c1e; word-wrap: break-word; overflow-wrap: anywhere; padding: 14px; }
+          body { font: -apple-system-body; color: #1c1c1e; word-wrap: break-word; overflow-wrap: anywhere; padding: \(padding); }
           img { max-width: 100%; height: auto; }
           pre { white-space: pre-wrap; }
           a { color: #3d73fa; }
@@ -61,7 +69,9 @@ struct HTMLView: UIViewRepresentable {
         var root = document.getElementById('drift-root');
         if (!root) return;
         root.style.zoom = 1;
-        var available = document.documentElement.clientWidth - 28;
+        var style = getComputedStyle(document.body);
+        var available = document.documentElement.clientWidth
+          - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0);
         var needed = root.scrollWidth;
         if (needed > available && available > 0) { root.style.zoom = available / needed; }
         // Measure the content, not the document: documentElement.scrollHeight is never

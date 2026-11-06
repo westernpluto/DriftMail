@@ -134,7 +134,7 @@ actor AccountSession {
             var summaries: [MessageSummary] = []
             // Fetch previews in chunks so one huge message cannot stall the page.
             for chunk in stride(from: 0, to: missing.count, by: 20).map({ Array(missing[$0..<min($0 + 20, missing.count)]) }) {
-                let previews = try await client.fetchPreviews(uids: chunk)
+                let previews = try await client.fetchPreviews(uids: chunk, previewBytes: Self.previewBytes)
                 for item in previews {
                     summaries.append(MIME.summary(from: item.body ?? [], accountID: accountID, mailbox: mailbox,
                                                   uid: item.uid, flags: item.flags, internalDate: item.internalDate))
@@ -150,6 +150,10 @@ actor AccountSession {
             return try await client.fetchFullMessage(uid: uid)
         }
     }
+
+    /// How much of each message the list downloads for its preview. Newsletters often
+    /// put a plain-text copy or a long stylesheet first, so 16 KB missed the real text.
+    private static let previewBytes = 48 * 1024
 
     // Bulk operations go out in chunks: a sparse set of thousands of UIDs makes a
     // command line some servers reject.
@@ -222,7 +226,7 @@ actor AccountSession {
             var summaries: [MessageSummary] = []
             for start in stride(from: 0, to: uids.count, by: 20) {
                 let chunk = Array(uids[start..<min(start + 20, uids.count)])
-                for item in try await client.fetchPreviews(uids: chunk) {
+                for item in try await client.fetchPreviews(uids: chunk, previewBytes: Self.previewBytes) {
                     summaries.append(MIME.summary(from: item.body ?? [], accountID: accountID, mailbox: mailbox,
                                                   uid: item.uid, flags: item.flags, internalDate: item.internalDate))
                 }

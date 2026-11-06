@@ -10,6 +10,8 @@ enum Persistence {
         var highestSeenUID: [String: UInt32] = [:]          // mailboxKey -> highest UID already notified
         // Optional so snapshots saved by older versions still decode.
         var unreadCounts: [String: Int]? = nil              // mailboxKey -> server's unread count
+        /// Version of the saved message summaries; older ones are re-downloaded once.
+        var cacheVersion: Int? = nil
     }
 
     private static var directory: URL {

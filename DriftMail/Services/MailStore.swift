@@ -57,6 +57,10 @@ final class MailStore {
     @ObservationIgnored private var liveEnabled = false
 
     private static let pageSize = 50
+    /// Bump when the way summaries (subject, sender, preview) are decoded changes, so
+    /// messages saved by an older version are downloaded again instead of keeping
+    /// e.g. "?" for emoji or CSS in the preview.
+    private static let cacheVersion = 2
 
     init() {
         let snapshot = Persistence.load()
@@ -64,7 +68,9 @@ final class MailStore {
         mailboxes = Dictionary(uniqueKeysWithValues: snapshot.mailboxes.compactMap { key, value in
             UUID(uuidString: key).map { ($0, value) }
         })
-        messagesByMailbox = snapshot.messages.mapValues { $0.uniquedByID() }
+        if snapshot.cacheVersion == Self.cacheVersion {
+            messagesByMailbox = snapshot.messages.mapValues { $0.uniquedByID() }
+        }  // otherwise start empty: each mailbox reloads from the server
         highestSeenUID = snapshot.highestSeenUID
         unreadCounts = snapshot.unreadCounts ?? [:]
         shareAccountsWithExtension()
@@ -90,6 +96,7 @@ final class MailStore {
         snapshot.messages = messagesByMailbox.mapValues { Array($0.prefix(200)) }
         snapshot.highestSeenUID = highestSeenUID
         snapshot.unreadCounts = unreadCounts
+        snapshot.cacheVersion = Self.cacheVersion
         Persistence.save(snapshot)
     }
 
@@ -363,14 +370,27 @@ final class MailStore {
         }
         // Parsing and preview text stay off the main thread: a very large HTML email
         // could otherwise freeze the app long enough for iOS to stop it.
-        let (body, preview) = await Task.detached(priority: .userInitiated) { () -> (MessageBody, String) in
-            let body = MIME.extractBody(MIME.parse(raw))
-            return (body, MIME.previewText(from: body))
+        let (body, preview, subject, from) = await Task.detached(priority: .userInitiated) {
+            () -> (MessageBody, String, String?, EmailAddress?) in
+            let root = MIME.parse(raw)
+            let body = MIME.extractBody(root)
+            let subject = root.header("subject").map {
+                MIME.decodeEncodedWords($0).trimmingCharacters(in: .whitespaces)
+            }
+            return (body, MIME.previewText(from: body), subject, MIME.parseAddresses(root.header("from")).first)
         }.value
         bodyCache[summary.id] = body
-        // The list preview came from the first 16 KB only; the full message gives the real one.
-        if !preview.isEmpty, preview != summary.preview {
-            update(summary) { $0.preview = preview }
+        // The list row came from the start of the message only (and may have been saved
+        // by an older version); the full message gives the real subject, sender and preview.
+        let newPreview = preview.isEmpty ? summary.preview : preview
+        let newSubject = subject ?? summary.subject
+        let newFrom = from ?? summary.from
+        if newPreview != summary.preview || newSubject != summary.subject || newFrom != summary.from {
+            update(summary) {
+                $0.preview = newPreview
+                $0.subject = newSubject
+                $0.from = newFrom
+            }
             save()
         }
         return body

@@ -26,10 +26,18 @@ struct MessageDetailView: View {
                         Theme.softDrift
                             .backgroundExtensionEffect()
                     }
+                if let html = body_?.html {
+                    // HTML email: the full column, edge to edge like Apple Mail. The email's
+                    // own layout decides its margins (simple ones get margins in HTMLView).
+                    HTMLView(html: html, height: $htmlHeight)
+                        .frame(height: htmlHeight)
+                }
                 VStack(alignment: .leading, spacing: 0) {
-                    content
-                        .padding(.horizontal)
-                        .padding(.top, 8)
+                    if body_?.html == nil {
+                        content
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                    }
                     if let attachments = body_?.visibleAttachments, !attachments.isEmpty {
                         attachmentGrid(attachments)
                             .padding()
@@ -124,11 +132,8 @@ struct MessageDetailView: View {
     @ViewBuilder
     private var content: some View {
         if let body = body_ {
-            if let html = body.html {
-                HTMLView(html: html, height: $htmlHeight)
-                    .frame(height: htmlHeight)
-                    .clipShape(.rect(cornerRadius: 18, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.quaternary))
+            if body.html != nil {
+                EmptyView()  // shown full width above
             } else {
                 Text(body.plainText ?? "")
                     .font(.body)

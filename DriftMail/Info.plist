@@ -67,6 +67,13 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Email images are often still served over http. This only applies to web
+		     content (the message view); the app's own connections stay https-only. -->
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>DriftMail attaches the photos you choose to your email.</string>
 </dict>
