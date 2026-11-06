@@ -59,8 +59,17 @@ enum MIME {
         let (type, params) = parseParameterHeader(typeHeader)
         var part = MIMEPart(headers: headers, contentType: type.lowercased().isEmpty ? "text/plain" : type.lowercased(),
                             parameters: params, rawBody: body, children: [])
-        if part.isMultipart, let boundary = params["boundary"], !boundary.isEmpty {
-            part.children = splitMultipart(body, boundary: boundary).map(parse)
+        if part.isMultipart {
+            var sections: [[UInt8]] = []
+            if let boundary = params["boundary"], !boundary.isEmpty {
+                sections = splitMultipart(body, boundary: boundary)
+            }
+            // The declared boundary didn't match the body (mangled header, wrong case,
+            // stray quotes): use the delimiter the body actually starts its parts with.
+            if sections.isEmpty, let guessed = guessBoundary(body) {
+                sections = splitMultipart(body, boundary: guessed)
+            }
+            part.children = sections.map(parse)
         } else if part.contentType == "message/rfc822" {
             part.children = [parse(Array(part.decodedBody))]
         }
@@ -104,6 +113,23 @@ enum MIME {
         let lead = bytes[index]
         let needed = lead >= 0xF0 ? 3 : lead >= 0xE0 ? 2 : lead >= 0xC0 ? 1 : 0
         return needed > continuation
+    }
+
+    /// The first "--something" line of a multipart body, as its boundary.
+    static func guessBoundary(_ body: [UInt8]) -> String? {
+        var lineStart = 0
+        for i in 0...body.count where i == body.count || body[i] == 10 {
+            var end = i
+            if end > lineStart && body[end - 1] == 13 { end -= 1 }
+            if end - lineStart > 2, body[lineStart] == 45, body[lineStart + 1] == 45 {
+                let candidate = String(decoding: body[(lineStart + 2)..<end], as: UTF8.self)
+                    .trimmingCharacters(in: .whitespaces)
+                if !candidate.isEmpty, !candidate.hasSuffix("--") { return candidate }
+            }
+            lineStart = i + 1
+            if lineStart > 8192 { break }  // the first delimiter is near the top
+        }
+        return nil
     }
 
     static func splitHeaderAndBody(_ bytes: [UInt8]) -> ([UInt8], [UInt8]) {
@@ -460,6 +486,30 @@ enum MIME {
             }
         }
         walk(root)
+
+        func isBlank(_ text: String?) -> Bool { text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }
+        if isBlank(html) { html = nil }
+        if isBlank(plain) { plain = nil }
+        // Nothing readable found: fall back to any text section, even one marked as an
+        // attachment or an unusual text type, rather than showing an empty message.
+        if html == nil && plain == nil {
+            func anyText(_ part: MIMEPart) {
+                if part.isMultipart || part.contentType == "message/rfc822" {
+                    part.children.forEach(anyText)
+                    return
+                }
+                guard part.contentType.hasPrefix("text/") || part.contentType.isEmpty else { return }
+                let text = part.decodedText
+                guard !isBlank(text) else { return }
+                if part.contentType == "text/html" || text.range(of: "<html|<body|<table|<div",
+                                                                   options: [.regularExpression, .caseInsensitive]) != nil {
+                    if html == nil { html = text }
+                } else if plain == nil {
+                    plain = text
+                }
+            }
+            anyText(root)
+        }
 
         if var page = html {
             for attachment in attachments where attachment.contentID != nil {

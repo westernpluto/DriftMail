@@ -136,7 +136,15 @@ struct HTMLView: UIViewRepresentable {
         }
         root.style.zoom = Math.max(0.25, zoom);
         var body = document.body;
-        var height = Math.max(body.scrollHeight, Math.ceil(body.getBoundingClientRect().height));
+        var height = Math.max(body.scrollHeight, body.offsetHeight, Math.ceil(body.getBoundingClientRect().height));
+        // Layouts built with absolute positioning don't add to the body's height; use
+        // where the content actually ends so such an email never collapses to nothing.
+        var all = root.getElementsByTagName('*');
+        var count = Math.min(all.length, 4000);
+        for (var k = 0; k < count; k++) {
+          var rect = all[k].getBoundingClientRect();
+          if (rect.height > 0 && rect.bottom + window.scrollY > height) { height = Math.ceil(rect.bottom + window.scrollY); }
+        }
         window.webkit.messageHandlers.size.postMessage(height);
       }
       function schedule() {
@@ -163,7 +171,8 @@ struct HTMLView: UIViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard let value = message.body as? Double ?? (message.body as? Int).map(Double.init) else { return }
-            let newHeight = CGFloat(value)
+            // Never collapse to (almost) nothing, which looked like a blank black message.
+            let newHeight = max(CGFloat(value), 60)
             if abs(newHeight - height.wrappedValue) > 1 {
                 DispatchQueue.main.async { self.height.wrappedValue = newHeight }
             }

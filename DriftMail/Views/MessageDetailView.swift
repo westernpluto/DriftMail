@@ -13,6 +13,10 @@ struct MessageDetailView: View {
     @State private var previewURL: URL?
     /// Plain text for Share, made once in the background (not on every redraw).
     @State private var shareText: String?
+    /// What the share sheet offers: the text and the original email (.eml).
+    @State private var shareItems: [Any]?
+    /// "View as Plain Text": shows the text version instead of the HTML.
+    @State private var showPlainText = false
     /// Remote images were allowed for this message (Load Images) while blocking is on.
     @State private var allowRemoteContent = false
     @AppStorage(RemoteContent.blockKey) private var blockRemoteImages = false
@@ -29,7 +33,7 @@ struct MessageDetailView: View {
                         Theme.softDrift
                             .backgroundExtensionEffect()
                     }
-                if let html = body_?.html {
+                if let html = body_?.html, !showPlainText {
                     let blocking = blockRemoteImages && !allowRemoteContent && HTMLView.hasRemoteContent(html)
                     if blocking {
                         remoteContentBar
@@ -43,7 +47,7 @@ struct MessageDetailView: View {
                     .id(blocking)  // rebuilt without the block after Load Images
                 }
                 VStack(alignment: .leading, spacing: 0) {
-                    if body_?.html == nil {
+                    if body_?.html == nil || showPlainText {
                         content
                             .padding(.horizontal)
                             .padding(.top, 8)
@@ -63,6 +67,27 @@ struct MessageDetailView: View {
         .task(id: summary.id) { await load() }
         .quickLookPreview($previewURL)
         .toolbar { toolbarContent }
+        .sheet(isPresented: Binding(get: { shareItems != nil }, set: { if !$0 { shareItems = nil } })) {
+            ActivityView(items: shareItems ?? [])
+                .presentationDetents([.medium, .large])
+                .ignoresSafeArea()
+        }
+    }
+
+    /// Text plus the original message as a .eml file (opens in Mail, Files, etc.).
+    private func share() {
+        var items: [Any] = []
+        if let text = shareText { items.append("\(summary.subject)\n\n\(text)") }
+        if let raw = Persistence.cachedRawMessage(summary.id) {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var scalars = summary.subject.unicodeScalars
+            scalars.removeAll { CharacterSet.controlCharacters.contains($0) || "/\\:".unicodeScalars.contains($0) }
+            let name = String(String(scalars).prefix(80)).trimmingCharacters(in: .whitespaces)
+            let url = dir.appendingPathComponent((name.isEmpty ? "Message" : name) + ".eml")
+            if (try? Data(raw).write(to: url)) != nil { items.append(url) }
+        }
+        if !items.isEmpty { shareItems = items }
     }
 
     // MARK: Header
@@ -161,14 +186,25 @@ struct MessageDetailView: View {
     @ViewBuilder
     private var content: some View {
         if let body = body_ {
-            if body.html != nil {
+            let text = body.plainText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+                ?? (showPlainText ? shareText : nil)
+            if body.html != nil && !showPlainText {
                 EmptyView()  // shown full width above
-            } else {
-                Text(body.plainText ?? "")
+            } else if let text {
+                Text(text)
                     .font(.body)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
+            } else if body.visibleAttachments.isEmpty {
+                // Never an empty black area: say so, and offer the original file.
+                ContentUnavailableView {
+                    Label("Can\u{2019}t Show This Message", systemImage: "envelope.badge")
+                } description: {
+                    Text("DriftMail couldn\u{2019}t find readable content in it. Share the original to open it elsewhere.")
+                } actions: {
+                    Button("Share Original") { share() }
+                }
             }
         } else if let loadError {
             ContentUnavailableView {
@@ -297,9 +333,19 @@ struct MessageDetailView: View {
             } label: {
                 Label("Show All from \(summary.from.displayName)", systemImage: "person.crop.circle")
             }
-            if let text = shareText {
-                ShareLink(item: "\(summary.subject)\n\n\(text)") {
-                    Label("Share", systemImage: "square.and.arrow.up")
+            // A plain button + sheet: a ShareLink inside this overflow menu didn't open.
+            Button {
+                share()
+            } label: {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+            .disabled(body_ == nil)
+            if body_?.html != nil, !(body_?.plainText ?? "").isEmpty || shareText != nil {
+                Button {
+                    showPlainText.toggle()
+                } label: {
+                    Label(showPlainText ? "View as Formatted" : "View as Plain Text",
+                          systemImage: showPlainText ? "doc.richtext" : "doc.plaintext")
                 }
             }
         }
@@ -352,4 +398,15 @@ struct AttachmentTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(attachment.filename), \(attachment.sizeLabel)")
     }
+}
+
+/// The system share sheet.
+struct ActivityView: UIViewControllerRepresentable {
+    var items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
