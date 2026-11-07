@@ -8,7 +8,6 @@ struct MessageDetailView: View {
 
     @State private var body_: MessageBody?
     @State private var loadError: String?
-    @State private var htmlHeight: CGFloat = 200
     @State private var showDetails = false
     @State private var previewURL: URL?
     /// Plain text for Share, made once in the background (not on every redraw).
@@ -17,48 +16,48 @@ struct MessageDetailView: View {
     @State private var shareItems: [Any]?
     /// "View as Plain Text": shows the text version instead of the HTML.
     @State private var showPlainText = false
+    /// Why the formatted email couldn't be shown (it then falls back to text).
+    @State private var renderFailure: String?
     /// Remote images were allowed for this message (Load Images) while blocking is on.
     @State private var allowRemoteContent = false
     @AppStorage(RemoteContent.blockKey) private var blockRemoteImages = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // The text stays at a readable width, but the tint spans the whole
-                // column so it can extend under the side toolbar on iPhone Duo.
-                header
-                    .frame(maxWidth: 820, alignment: .leading)
-                    .frame(maxWidth: .infinity)
-                    .background {
-                        Theme.softDrift
-                            .backgroundExtensionEffect()
+        Group {
+            if let html = body_?.html, !showPlainText {
+                let blocking = blockRemoteImages && !allowRemoteContent && HTMLView.hasRemoteContent(html)
+                // HTML email: a screen-sized web view that scrolls the email itself, with the
+                // header and attachments scrolling inside it (as in Apple Mail).
+                HTMLView(html: html,
+                         header: AnyView(webHeader(blocking: blocking).environment(store).tint(Theme.accent)),
+                         footer: attachmentsFooter,
+                         blockRemoteContent: blocking,
+                         onMailto: { address in store.compose = ComposeContext(mode: .new, to: address) },
+                         onFailure: { reason in
+                             renderFailure = reason
+                             showPlainText = true
+                         })
+                .id(blocking)  // rebuilt without the block after Load Images
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        tintedHeader
+                        if let renderFailure, showPlainText {
+                            renderFailureBar(renderFailure)
+                        }
+                        VStack(alignment: .leading, spacing: 0) {
+                            content
+                                .padding(.horizontal)
+                                .padding(.top, 8)
+                            if let attachments = body_?.visibleAttachments, !attachments.isEmpty {
+                                attachmentGrid(attachments)
+                                    .padding()
+                            }
+                        }
+                        .frame(maxWidth: 820)
+                        .frame(maxWidth: .infinity)
                     }
-                if let html = body_?.html, !showPlainText {
-                    let blocking = blockRemoteImages && !allowRemoteContent && HTMLView.hasRemoteContent(html)
-                    if blocking {
-                        remoteContentBar
-                    }
-                    // HTML email: the full column, edge to edge like Apple Mail. The email's
-                    // own layout decides its margins (simple ones get margins in HTMLView).
-                    HTMLView(html: html, height: $htmlHeight, blockRemoteContent: blocking) { address in
-                        store.compose = ComposeContext(mode: .new, to: address)
-                    }
-                    .frame(height: htmlHeight)
-                    .id(blocking)  // rebuilt without the block after Load Images
                 }
-                VStack(alignment: .leading, spacing: 0) {
-                    if body_?.html == nil || showPlainText {
-                        content
-                            .padding(.horizontal)
-                            .padding(.top, 8)
-                    }
-                    if let attachments = body_?.visibleAttachments, !attachments.isEmpty {
-                        attachmentGrid(attachments)
-                            .padding()
-                    }
-                }
-                .frame(maxWidth: 820)
-                .frame(maxWidth: .infinity)
             }
         }
         .background(Color(uiColor: .systemBackground))
@@ -91,6 +90,65 @@ struct MessageDetailView: View {
     }
 
     // MARK: Header
+
+    /// The text stays at a readable width, but the tint spans the whole column so it can
+    /// extend under the side toolbar on iPhone Duo.
+    private var tintedHeader: some View {
+        header
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .background {
+                Theme.softDrift
+                    .backgroundExtensionEffect()
+            }
+    }
+
+    /// The header shown above an HTML email inside its web view (opaque, so the email's
+    /// white page never shows through it).
+    private func webHeader(blocking: Bool) -> some View {
+        VStack(spacing: 0) {
+            tintedHeader
+            if blocking {
+                remoteContentBar
+            }
+        }
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    /// Attachments shown below an HTML email inside its web view.
+    private var attachmentsFooter: AnyView? {
+        guard let attachments = body_?.visibleAttachments, !attachments.isEmpty else { return nil }
+        return AnyView(
+            attachmentGrid(attachments)
+                .padding()
+                .frame(maxWidth: 820)
+                .frame(maxWidth: .infinity)
+                .background(Color(uiColor: .systemBackground))
+                .environment(store)
+                .tint(Theme.accent))
+    }
+
+    private func renderFailureBar(_ reason: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+            Text("\(reason) Showing the text version.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("Try Again") {
+                renderFailure = nil
+                showPlainText = false
+            }
+            .font(.footnote.weight(.semibold))
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+    }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {

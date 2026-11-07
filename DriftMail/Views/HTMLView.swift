@@ -1,7 +1,8 @@
 import SwiftUI
 import WebKit
 
-/// Renders an HTML email at its natural height so it scrolls with the rest of the message.
+/// Renders an HTML email in a screen-sized web view that scrolls it, with the native
+/// sender header above and attachments below scrolling along (as in Apple Mail).
 ///
 /// Sizing follows Apple Mail: a fixed-width newsletter (usually 600 px) is scaled as a
 /// whole to fill the width, and anything wider than the screen is scaled down.
@@ -11,17 +12,24 @@ import WebKit
 /// for safe schemes. Remote images can be blocked (Settings) to stop tracking pixels.
 struct HTMLView: UIViewRepresentable {
     var html: String
-    @Binding var height: CGFloat
+    /// Native views that scroll with the email: the sender header above it and the
+    /// attachments below it.
+    var header: AnyView
+    var footer: AnyView?
     /// Block http(s) loads (remote images, tracking pixels) until the user allows them.
     var blockRemoteContent = false
     /// `mailto:` links open a DriftMail compose window instead of another app.
     var onMailto: (String) -> Void = { _ in }
+    /// Called with a reason if the email can't be displayed (so the text version can be shown).
+    var onFailure: (String) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator(height: $height, onMailto: onMailto) }
+    func makeCoordinator() -> Coordinator { Coordinator(onMailto: onMailto, onFailure: onFailure) }
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> HeaderedWebView {
         let config = WKWebViewConfiguration()
-        config.dataDetectorTypes = [.link, .phoneNumber, .address, .calendarEvent]
+        // Links and phone numbers only: address/date detection is heavy, iOS-only work
+        // on the whole email, and the emails that rendered blank all had postal addresses.
+        config.dataDetectorTypes = [.link, .phoneNumber]
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let script = WKUserScript(source: Self.measureScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient)
@@ -31,10 +39,16 @@ struct HTMLView: UIViewRepresentable {
             config.userContentController.add(rules)
         }
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        // The web view is only as big as the screen and scrolls the email itself, like
+        // Apple Mail, instead of being as tall as the whole email inside another scroll
+        // view: one view thousands of points tall went blank on the large inner display.
+        let webView = HeaderedWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
+        webView.scrollView.isScrollEnabled = true
+        webView.scrollView.alwaysBounceVertical = true
+        // Pinch-zoom would scale the email but not the native header; the email is
+        // already scaled to fit the width.
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         // Render email as designed for light mode, like Apple Mail does here. In Dark Mode
         // the web view otherwise reports `prefers-color-scheme: dark`, and emails with
         // their own dark styles could turn into dark text on a black, empty-looking card.
@@ -46,14 +60,24 @@ struct HTMLView: UIViewRepresentable {
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.onMailto = onMailto
-        guard context.coordinator.loadedHTML != html else { return }
-        context.coordinator.loadedHTML = html
-        webView.loadHTMLString(Self.wrap(html), baseURL: nil)
+    /// Never inherit the web view's forced light mode in the native header and footer.
+    private static func style(for scheme: ColorScheme) -> UIUserInterfaceStyle {
+        scheme == .dark ? .dark : .light
     }
 
-    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+    func updateUIView(_ webView: HeaderedWebView, context: Context) {
+        context.coordinator.onMailto = onMailto
+        context.coordinator.onFailure = onFailure
+        let appStyle = Self.style(for: context.environment.colorScheme)
+        webView.setAccessories(header: header, footer: footer, style: appStyle)
+        // Overscroll above and below the email shows the app's background.
+        webView.underPageBackgroundColor = appStyle == .dark ? .black : .white
+        guard context.coordinator.loadedHTML != html else { return }
+        context.coordinator.loadedHTML = html
+        context.coordinator.start(webView, page: Self.wrap(html))
+    }
+
+    static func dismantleUIView(_ webView: HeaderedWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "size", contentWorld: .defaultClient)
     }
 
@@ -76,7 +100,22 @@ struct HTMLView: UIViewRepresentable {
                    options: [.regularExpression, .caseInsensitive]) != nil
     }
 
-    private static func wrap(_ html: String) -> String {
+    /// Remote web fonts and external stylesheets are dropped, as Gmail and Outlook do: on
+    /// iOS, text waiting for a web font stays invisible, and these requests also tell
+    /// senders that the email was opened.
+    private static func stripRemoteStyles(_ html: String) -> String {
+        var text = html
+        text = text.replacingOccurrences(of: #"@font-face\s*\{[^}]*\}"#, with: "",
+                                         options: [.regularExpression, .caseInsensitive])
+        text = text.replacingOccurrences(of: #"<link\b[^>]*rel\s*=\s*["']?stylesheet[^>]*>"#, with: "",
+                                         options: [.regularExpression, .caseInsensitive])
+        text = text.replacingOccurrences(of: #"@import\s+[^;]+;"#, with: "",
+                                         options: [.regularExpression, .caseInsensitive])
+        return text
+    }
+
+    private static func wrap(_ rawHTML: String) -> String {
+        let html = stripRemoteStyles(rawHTML)
         // Newsletters (table layouts) go edge to edge, as in Apple Mail; simple text
         // emails get normal reading margins.
         let isLayout = html.range(of: "<table", options: .caseInsensitive) != nil
@@ -160,22 +199,59 @@ struct HTMLView: UIViewRepresentable {
     """
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        var height: Binding<CGFloat>
         var loadedHTML: String?
         var onMailto: (String) -> Void
+        var onFailure: (String) -> Void
+        private var page = ""
+        private var reloads = 0
+        private var measured = false
+        private var watchdog: DispatchWorkItem?
 
-        init(height: Binding<CGFloat>, onMailto: @escaping (String) -> Void) {
-            self.height = height
+        init(onMailto: @escaping (String) -> Void, onFailure: @escaping (String) -> Void) {
             self.onMailto = onMailto
+            self.onFailure = onFailure
+        }
+
+        /// Loads the email and gives it a few seconds to lay out; if it never does (the
+        /// web process hung or ended), the message falls back to its text version.
+        func start(_ webView: WKWebView, page: String) {
+            self.page = page
+            reloads = 0
+            load(webView)
+        }
+
+        private func load(_ webView: WKWebView) {
+            measured = false
+            watchdog?.cancel()
+            let check = DispatchWorkItem { [weak self] in
+                guard let self, !self.measured else { return }
+                self.onFailure("The email didn\u{2019}t finish displaying.")
+            }
+            watchdog = check
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: check)
+            webView.loadHTMLString(page, baseURL: nil)
+        }
+
+        /// iOS ended the web content process (e.g. it ran out of memory): try once more.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            if reloads == 0 {
+                reloads += 1
+                load(webView)
+            } else {
+                watchdog?.cancel()
+                onFailure("iOS stopped the email view while displaying this message.")
+            }
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard let value = message.body as? Double ?? (message.body as? Int).map(Double.init) else { return }
-            // Never collapse to (almost) nothing, which looked like a blank black message.
-            let newHeight = max(CGFloat(value), 60)
-            if abs(newHeight - height.wrappedValue) > 1 {
-                DispatchQueue.main.async { self.height.wrappedValue = newHeight }
-            }
+            // The script reports the laid-out height: proof the email rendered.
+            guard message.body is Double || message.body is Int else { return }
+            measured = true
+            watchdog?.cancel()
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            (webView as? HeaderedWebView)?.scrollToTop()
         }
 
         /// Schemes a tapped link may open outside the app.
@@ -219,5 +295,64 @@ enum RemoteContent {
         let rules = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]"#
         blockRules = try? await store.compileContentRuleList(forIdentifier: "DriftMailBlockRemote",
                                                               encodedContentRuleList: rules)
+    }
+}
+
+/// A WKWebView whose scroll view also carries native SwiftUI views: a header above the
+/// email (in the top content inset) and a footer below it (in the bottom inset).
+final class HeaderedWebView: WKWebView {
+    private let headerHost = UIHostingController<AnyView>(rootView: AnyView(EmptyView()))
+    private let footerHost = UIHostingController<AnyView>(rootView: AnyView(EmptyView()))
+    private var headerHeight: CGFloat = 0
+    private var footerHeight: CGFloat = 0
+    private var contentSizeObservation: NSKeyValueObservation?
+
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        for host in [headerHost, footerHost] {
+            host.view.backgroundColor = .clear
+            scrollView.addSubview(host.view)
+        }
+        // The footer follows the end of the email as it lays out and images load.
+        contentSizeObservation = scrollView.observe(\.contentSize) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.setNeedsLayout() }
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func setAccessories(header: AnyView, footer: AnyView?, style: UIUserInterfaceStyle) {
+        headerHost.rootView = header
+        footerHost.rootView = footer ?? AnyView(EmptyView())
+        headerHost.view.overrideUserInterfaceStyle = style
+        footerHost.view.overrideUserInterfaceStyle = style
+        footerHost.view.isHidden = footer == nil
+        setNeedsLayout()
+    }
+
+    /// Shows the header (top of the message) unless the person already scrolled.
+    func scrollToTop() {
+        guard !scrollView.isTracking, !scrollView.isDecelerating else { return }
+        scrollView.setContentOffset(CGPoint(x: 0, y: -scrollView.adjustedContentInset.top), animated: false)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = bounds.width
+        guard width > 0 else { return }
+        let fitting = CGSize(width: width, height: .greatestFiniteMagnitude)
+        let newHeader = ceil(headerHost.sizeThatFits(in: fitting).height)
+        let newFooter = footerHost.view.isHidden ? 0 : ceil(footerHost.sizeThatFits(in: fitting).height)
+        if abs(newHeader - headerHeight) > 0.5 || abs(newFooter - footerHeight) > 0.5 {
+            let atTop = scrollView.contentOffset.y <= -scrollView.adjustedContentInset.top + 1
+            headerHeight = newHeader
+            footerHeight = newFooter
+            scrollView.contentInset = UIEdgeInsets(top: headerHeight, left: 0, bottom: footerHeight, right: 0)
+            scrollView.verticalScrollIndicatorInsets = scrollView.contentInset
+            if atTop { scrollToTop() }
+        }
+        headerHost.view.frame = CGRect(x: 0, y: -headerHeight, width: width, height: headerHeight)
+        footerHost.view.frame = CGRect(x: 0, y: scrollView.contentSize.height, width: width, height: footerHeight)
     }
 }
