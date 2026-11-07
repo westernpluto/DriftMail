@@ -182,6 +182,21 @@ final class PushRelay {
         }
     }
 
+    /// After an app update, wakes the new notification extension once with a silent push
+    /// (the app hides it), so the first real email isn't the one delayed by the
+    /// extension's first launch, which iOS makes slower for newly installed apps.
+    func warmUpAfterUpdateIfNeeded() async {
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        guard isConfigured, delivery == .apns, apnsToken != nil,
+              UserDefaults.standard.string(forKey: "relay.warmedBuild") != build else { return }
+        do {
+            _ = try await request("/v1/test", method: "POST", body: ["warmup": true])
+            UserDefaults.standard.set(build, forKey: "relay.warmedBuild")
+        } catch {
+            // Try again next launch.
+        }
+    }
+
     // MARK: Native push (paid Apple Developer account)
 
     /// This build is signed with push enabled and Apple gave us a device token.

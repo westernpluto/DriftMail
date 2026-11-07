@@ -106,6 +106,15 @@ async function route(request, env) {
   if (url.pathname === "/v1/test" && request.method === "POST") {
     const config = await loadConfig(env);
     if (!config) return json({ error: "Connect your accounts first." }, 400);
+    const options = await request.json().catch(() => ({}));
+    if (options && options.warmup) {
+      // After an app update: a silent push that wakes the new notification extension
+      // once (the app hides it), so the first real email isn't the one paying for the
+      // extension's first launch. Only native push has an extension.
+      if (config.delivery?.type !== "apns") return json({ ok: true, skipped: true });
+      await deliver(env, config, { title: "DriftMail", body: "Notifications are ready after the update.", accountId: null, uid: null, test: true, warmup: true });
+      return json({ ok: true });
+    }
     await deliver(env, config, {
       title: "DriftMail is connected",
       body: "You'll get a notification like this when new mail arrives.",
@@ -589,6 +598,11 @@ async function deliver(env, config, message) {
         aps: { alert: { title: "DriftMail", body: "New mail" }, sound: "default", "mutable-content": 1, "thread-id": "driftmail", category: "NEW_MAIL" },
         enc: sealed,
       };
+      if (message.warmup) {
+        delete payload.aps.sound;
+        payload.aps["interruption-level"] = "passive";
+        payload.warmup = 1;
+      }
     } else {
       payload = {
         aps: { alert: { title, body }, sound: "default", "thread-id": message.accountId || "driftmail", category: "NEW_MAIL" },

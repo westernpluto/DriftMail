@@ -38,6 +38,9 @@ struct MessageDetailView: View {
                              showPlainText = true
                          })
                 .id(blocking)  // rebuilt without the block after Load Images
+                // Bars above and below may show and hide while scrolling; the email view keeps
+                // its size (its scroll view insets adjust instead), so nothing reflows or jumps.
+                .ignoresSafeArea(.container, edges: .vertical)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
@@ -107,7 +110,11 @@ struct MessageDetailView: View {
     /// white page never shows through it).
     private func webHeader(blocking: Bool) -> some View {
         VStack(spacing: 0) {
-            tintedHeader
+            // Plain tint here: the edge-mirroring effect re-renders as the email scrolls.
+            header
+                .frame(maxWidth: 820, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .background(Theme.softDrift)
             if blocking {
                 remoteContentBar
             }

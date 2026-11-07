@@ -40,7 +40,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     // Show banners even when DriftMail is in the foreground.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        // The post-update warm-up push only exists to wake the extension: never show it.
+        if notification.request.content.userInfo["warmup"] != nil {
+            center.removeDeliveredNotifications(withIdentifiers: [notification.request.identifier])
+            return []
+        }
+        return [.banner, .list, .sound]
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {

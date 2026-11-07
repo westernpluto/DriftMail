@@ -66,22 +66,9 @@ final class NotificationService: UNNotificationServiceExtension {
             let subject = (payload["subject"] as? String) ?? ""
             content.body = subject.isEmpty ? "(No subject)" : subject
             NotificationDiagnostics.recordSuccess()
-            guard let account, let uid = (payload["uid"] as? Int).map({ UInt32($0) }),
-                  let password = SharedAccounts.password(for: account.id) else {
-                contentHandler(content)
-                return
-            }
-            let mailbox = payload["mailbox"] as? String ?? "INBOX"
-            // A preview line is a bonus: allow it about 3 seconds, never longer.
-            work = Task {
-                if case .success(let summary) = await Self.fetchSummary(account: account, password: password,
-                                                                        mailbox: mailbox, uid: uid, timeout: 3),
-                   !summary.preview.isEmpty {
-                    content.subtitle = content.body
-                    content.body = summary.preview
-                }
-                self.finish()
-            }
+            // Shown right away: waiting for a preview line from the mail server added
+            // seconds to every notification.
+            contentHandler(content)
             return
         }
 

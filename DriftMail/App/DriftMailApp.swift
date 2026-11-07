@@ -32,7 +32,10 @@ struct DriftMailApp: App {
                 Task { await lock.unlock() }
                 store.startLive()
                 Task { await store.refreshAll() }
-                Task { await relay.updateRelayIfNeeded() }
+                Task {
+                    await relay.updateRelayIfNeeded()  // new relay code first, if it changed
+                    await relay.warmUpAfterUpdateIfNeeded()
+                }
             case .background:
                 lock.lock()
                 store.stopLive()

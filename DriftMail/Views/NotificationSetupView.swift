@@ -207,6 +207,14 @@ struct NotificationSetupView: View {
                 .foregroundStyle(.orange)
                 .textSelection(.enabled)
             }
+            // When the extension last showed a notification with details. If a "New mail"
+            // arrives and this time doesn't change, iOS didn't run the extension for it.
+            if relay.privateNotifications, let success = NotificationDiagnostics.lastSuccess {
+                Label("Last notification with details: \(success.formatted(date: .abbreviated, time: .standard))",
+                      systemImage: "checkmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         } header: {
             Text("2 · Add your Apple Push key")
         } footer: {

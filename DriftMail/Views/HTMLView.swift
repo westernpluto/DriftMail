@@ -142,9 +142,11 @@ struct HTMLView: UIViewRepresentable {
     private static let measureScript = """
     (function() {
       var queued = false;
+      var lastWidth = -1;
       function fit() {
         var root = document.getElementById('drift-root');
         if (!root) return;
+        lastWidth = document.documentElement.clientWidth;
         root.style.zoom = 1;
         var style = getComputedStyle(document.body);
         var available = document.documentElement.clientWidth
@@ -192,8 +194,15 @@ struct HTMLView: UIViewRepresentable {
         requestAnimationFrame(function() { queued = false; fit(); });
       }
       window.addEventListener('load', schedule);
-      window.addEventListener('resize', schedule);
-      if (window.ResizeObserver) { new ResizeObserver(schedule).observe(document.body); }
+      // Only a width change needs a new scale. Height-only resizes happen while the email
+      // bounces at its ends (bars showing and hiding); rescaling then made it jump.
+      window.addEventListener('resize', function() {
+        if (document.documentElement.clientWidth !== lastWidth) { schedule(); }
+      });
+      // Images that finish loading late can change the layout's width.
+      document.addEventListener('load', function(event) {
+        if (event.target && event.target.tagName === 'IMG') { schedule(); }
+      }, true);
       fit();
     })();
     """
@@ -306,6 +315,8 @@ final class HeaderedWebView: WKWebView {
     private var headerHeight: CGFloat = 0
     private var footerHeight: CGFloat = 0
     private var contentSizeObservation: NSKeyValueObservation?
+    /// Once the person scrolls, the email is never moved for them again.
+    private var userHasScrolled = false
 
     override init(frame: CGRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame, configuration: configuration)
@@ -317,6 +328,11 @@ final class HeaderedWebView: WKWebView {
         contentSizeObservation = scrollView.observe(\.contentSize) { [weak self] _, _ in
             DispatchQueue.main.async { self?.setNeedsLayout() }
         }
+        scrollView.panGestureRecognizer.addTarget(self, action: #selector(userPanned))
+    }
+
+    @objc private func userPanned() {
+        userHasScrolled = true
     }
 
     @available(*, unavailable)
@@ -333,7 +349,7 @@ final class HeaderedWebView: WKWebView {
 
     /// Shows the header (top of the message) unless the person already scrolled.
     func scrollToTop() {
-        guard !scrollView.isTracking, !scrollView.isDecelerating else { return }
+        guard !userHasScrolled, !scrollView.isTracking, !scrollView.isDecelerating else { return }
         scrollView.setContentOffset(CGPoint(x: 0, y: -scrollView.adjustedContentInset.top), animated: false)
     }
 
