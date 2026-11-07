@@ -25,6 +25,9 @@ final class NotificationService: UNNotificationServiceExtension {
                 NotificationDiagnostics.recordFailure(
                     "Couldn't decrypt it: the key on this phone doesn't match the relay's (set up Apple Push again)",
                     account: "unknown account")
+                NotificationDiagnostics.recordRun("\u{201C}New mail\u{201D}: couldn\u{2019}t decrypt it")
+            } else {
+                NotificationDiagnostics.recordRun("Unencrypted notification shown as sent")
             }
             contentHandler(content)
             return
@@ -41,6 +44,7 @@ final class NotificationService: UNNotificationServiceExtension {
         if let title = payload["title"] as? String, let body = payload["body"] as? String {
             content.title = title
             content.body = body
+            NotificationDiagnostics.recordRun(content.userInfo["warmup"] != nil ? "Update warm-up" : "Test notification")
             contentHandler(content)
             return
         }
@@ -55,6 +59,7 @@ final class NotificationService: UNNotificationServiceExtension {
         if let more = payload["more"] as? Int, let account {
             content.title = account.email
             content.body = "\(more) more new messages"
+            NotificationDiagnostics.recordRun("Several new messages at once")
             contentHandler(content)
             return
         }
@@ -66,6 +71,7 @@ final class NotificationService: UNNotificationServiceExtension {
             let subject = (payload["subject"] as? String) ?? ""
             content.body = subject.isEmpty ? "(No subject)" : subject
             NotificationDiagnostics.recordSuccess()
+            NotificationDiagnostics.recordRun("Sender and subject from the relay: \(from)")
             // Shown right away: waiting for a preview line from the mail server added
             // seconds to every notification.
             contentHandler(content)
@@ -84,6 +90,7 @@ final class NotificationService: UNNotificationServiceExtension {
                 reason = "Couldn't read the account's password from the shared keychain"
             }
             NotificationDiagnostics.recordFailure(reason, account: account?.email ?? "unknown account")
+            NotificationDiagnostics.recordRun("\u{201C}New mail\u{201D}: \(reason)")
             contentHandler(content)
             return
         }
@@ -102,6 +109,7 @@ final class NotificationService: UNNotificationServiceExtension {
                     content.subtitle = summary.subject.isEmpty ? "(No subject)" : summary.subject
                     content.body = summary.preview
                     NotificationDiagnostics.recordSuccess()
+                    NotificationDiagnostics.recordRun("Fetched from the mail server: \(summary.from.displayName)")
                     self.finish()
                     return
                 case .failure(let error):
@@ -110,6 +118,7 @@ final class NotificationService: UNNotificationServiceExtension {
                 }
             }
             NotificationDiagnostics.recordFailure(failure, account: account.email)
+            NotificationDiagnostics.recordRun("\u{201C}New mail\u{201D}: \(failure)")
             self.finish()
         }
     }
@@ -119,6 +128,7 @@ final class NotificationService: UNNotificationServiceExtension {
         if contentHandler != nil, let email = SharedAccounts.account(
             (content?.userInfo["account"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID())?.email {
             NotificationDiagnostics.recordFailure("iOS stopped the notification extension before it finished", account: email)
+            NotificationDiagnostics.recordRun("\u{201C}New mail\u{201D}: iOS time limit reached")
         }
         finish()
     }

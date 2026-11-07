@@ -624,6 +624,9 @@ final class MailStore {
         for account in accounts {
             fresh += await refreshMailbox(inbox(for: account.id))
         }
+        // With the relay set up it already announced these: posting them again here
+        // gave duplicate notifications whenever iOS ran a background refresh.
+        guard !PushRelay.shared.isConfigured else { return }
         for message in fresh.prefix(10) {
             NotificationService.postLocal(for: message, accountName: account(message.accountID)?.email ?? "")
         }

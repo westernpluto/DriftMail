@@ -306,7 +306,10 @@ async function deliverNew(env, config, account, imap, state, persist) {
   const readHeaders = relayReadsHeaders(config);
   const items = readHeaders ? "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])" : "(UID FLAGS)";
   const fetched = await imap.command(`UID FETCH ${from}:* ${items}`);
-  const messages = [];
+  // One entry per message. Servers also send unrequested FETCH lines (e.g. just the
+  // flags of the message that arrived); counted separately, such a line became a
+  // second notification with no sender or subject ("New mail").
+  const byUid = new Map();
   let highest = 0;
   for (const u of fetched.untagged) {
     if (!/ FETCH /i.test(u.text)) continue;
@@ -314,15 +317,23 @@ async function deliverNew(env, config, account, imap, state, persist) {
     // "UID n:*" also returns the newest message when nothing is >= n; skip it.
     if (!uid || uid < from) continue;
     highest = Math.max(highest, uid);
-    if (/\\Seen/i.test(u.text)) continue;
+    const entry = byUid.get(uid) || { seen: false, headerText: "" };
+    if (/\\Seen/i.test(u.text)) entry.seen = true;
+    if (u.literals.length) entry.headerText += u.literals.map((l) => decodeBytes(l)).join("\n");
+    byUid.set(uid, entry);
+  }
+  const messages = [];
+  for (const [uid, entry] of byUid) {
+    if (entry.seen) continue;
     if (!readHeaders) {
       messages.push({ uid, title: null, body: null });
       continue;
     }
-    const headers = parseHeaders(u.literals.map((l) => decodeBytes(l)).join("\n"));
+    const headers = parseHeaders(entry.headerText);
+    const sender = decodeWords(headers.from || "");
     messages.push({
       uid,
-      title: displayName(decodeWords(headers.from || "")) || "New mail",
+      title: displayName(sender) || "Unknown sender",
       body: decodeWords(headers.subject || "") || "(No subject)",
     });
   }

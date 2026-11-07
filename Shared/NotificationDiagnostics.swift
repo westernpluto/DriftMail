@@ -24,6 +24,27 @@ enum NotificationDiagnostics {
         SharedSecrets.set(data, for: successAccount)
     }
 
+    /// The last few notifications the extension handled and how, newest first. If a
+    /// notification shows only "New mail" and has no entry here, iOS didn't run the
+    /// extension for it.
+    struct Run: Codable, Identifiable {
+        var id = UUID()
+        var date: Date
+        var outcome: String
+    }
+
+    private static let runsAccount = "notification-recent-runs"
+
+    static func recordRun(_ outcome: String) {
+        let runs = [Run(date: Date(), outcome: outcome)] + recentRuns.prefix(11)
+        guard let data = try? JSONEncoder().encode(runs) else { return }
+        SharedSecrets.set(data, for: runsAccount)
+    }
+
+    static var recentRuns: [Run] {
+        SharedSecrets.get(runsAccount).flatMap { try? JSONDecoder().decode([Run].self, from: $0) } ?? []
+    }
+
     static var lastFailure: Failure? {
         SharedSecrets.get(failureAccount).flatMap { try? JSONDecoder().decode(Failure.self, from: $0) }
     }

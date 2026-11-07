@@ -215,6 +215,23 @@ struct NotificationSetupView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            if relay.privateNotifications, !NotificationDiagnostics.recentRuns.isEmpty {
+                DisclosureGroup("Recent notifications") {
+                    ForEach(NotificationDiagnostics.recentRuns) { run in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(run.date.formatted(date: .abbreviated, time: .standard))
+                                .foregroundStyle(.secondary)
+                            Text(run.outcome)
+                        }
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                    }
+                    Text("A \u{201C}New mail\u{201D} notification with no entry here means iOS didn\u{2019}t run DriftMail\u{2019}s notification extension for it.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.footnote)
+            }
         } header: {
             Text("2 · Add your Apple Push key")
         } footer: {
