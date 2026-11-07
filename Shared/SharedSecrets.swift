@@ -19,41 +19,70 @@ enum SharedSecrets {
         return signingTeamID.map { "\($0).app.driftmail.shared" }
     }
 
-    /// The signing Team ID, read from this binary's default keychain access group.
-    static let signingTeamID: String? = {
-        let query: [String: Any] = [
+    /// The signing Team ID.
+    ///
+    /// Read from this bundle's provisioning profile first: that needs no keychain. The
+    /// older way, a probe keychain item, used iOS's default protection ("only while
+    /// unlocked"), so a notification extension started while the phone was locked found
+    /// no Team ID, couldn't reach the shared key and showed only "New mail".
+    /// A missing value is never cached, so one locked moment can't stick.
+    static var signingTeamID: String? {
+        if let cachedTeamID { return cachedTeamID }
+        let found = teamIDFromProfile() ?? teamIDFromProbe()
+        if let found { cachedTeamID = found }
+        return found
+    }
+
+    nonisolated(unsafe) private static var cachedTeamID: String?
+
+    private static func teamIDFromProfile() -> String? {
+        guard let team = (embeddedProfile?["TeamIdentifier"] as? [String])?.first, team.count == 10 else { return nil }
+        return team
+    }
+
+    private static func teamIDFromProbe() -> String? {
+        let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "app.driftmail.team-probe",
             kSecAttrAccount as String: "probe",
-            kSecReturnAttributes as String: true,
         ]
+        let accessible = [kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        var query = base
+        query[kSecReturnAttributes as String] = true
         var result: AnyObject?
         var status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
-            var add = query
-            add[kSecReturnAttributes as String] = nil
+            var add = base
             add[kSecValueData as String] = Data("probe".utf8)
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             SecItemAdd(add as CFDictionary, nil)
             status = SecItemCopyMatching(query as CFDictionary, &result)
+        } else if status == errSecSuccess {
+            // Probes made by older versions were "only while unlocked": upgrade them.
+            SecItemUpdate(base as CFDictionary, accessible as CFDictionary)
         }
         guard status == errSecSuccess,
               let group = (result as? [String: Any])?[kSecAttrAccessGroup as String] as? String,
               let prefix = group.split(separator: ".").first, prefix.count == 10 else { return nil }
         return String(prefix)
+    }
+
+    /// This bundle's embedded.mobileprovision as a dictionary (nil for App Store builds).
+    private static let embeddedProfile: [String: Any]? = {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .isoLatin1),
+              let start = text.range(of: "<?xml"), let end = text.range(of: "</plist>"),
+              start.lowerBound < end.upperBound,
+              let plistData = String(text[start.lowerBound..<end.upperBound]).data(using: .isoLatin1) else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: plistData, format: nil)) as? [String: Any]
     }()
 
     /// "development" or "production", from the push entitlement in this build's
     /// provisioning profile. App Store/TestFlight builds have no embedded profile
     /// and always use production.
     static var apnsEnvironment: String {
-        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-              let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .isoLatin1),
-              let start = text.range(of: "<?xml"), let end = text.range(of: "</plist>"),
-              start.lowerBound < end.upperBound,
-              let plistData = String(text[start.lowerBound..<end.upperBound]).data(using: .isoLatin1),
-              let plist = (try? PropertyListSerialization.propertyList(from: plistData, format: nil)) as? [String: Any],
-              let entitlements = plist["Entitlements"] as? [String: Any],
+        guard let entitlements = embeddedProfile?["Entitlements"] as? [String: Any],
               let environment = entitlements["aps-environment"] as? String else { return "production" }
         return environment == "development" ? "development" : "production"
     }
