@@ -107,6 +107,30 @@ struct SettingsView: View {
                     }
                 }
 
+                if !store.openTimings.isEmpty {
+                    Section {
+                        ForEach(store.openTimings) { timing in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(timing.subject.isEmpty ? "(No subject)" : timing.subject)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(OpenTiming.seconds(max(timing.displayed, timing.ready)))
+                                        .monospacedDigit()
+                                        .foregroundStyle(max(timing.displayed, timing.ready) > 3 ? Color.orange : Color.secondary)
+                                }
+                                Text(timing.breakdown)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    } header: {
+                        Text("Recent Email Opens")
+                    } footer: {
+                        Text("How long each email took from tapping it until it was on screen, and where the time went. Kept until DriftMail closes.")
+                    }
+                }
+
                 Section {
                     LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
                     Link(destination: URL(string: "https://github.com/westernpluto/DriftMail")!) {

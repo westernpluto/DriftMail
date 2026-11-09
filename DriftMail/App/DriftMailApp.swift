@@ -31,6 +31,7 @@ struct DriftMailApp: App {
             case .active:
                 Task { await lock.unlock() }
                 store.startLive()
+                store.warmConnections()
                 Task { await store.refreshAll() }
                 Task {
                     await relay.updateRelayIfNeeded()  // new relay code first, if it changed
@@ -40,6 +41,7 @@ struct DriftMailApp: App {
                 lock.lock()
                 store.stopLive()
                 store.closeConnections()
+                store.saveNow()
                 NotificationService.updateBadge(store.unreadCount(.unifiedInbox))
                 Task { await Self.scheduleBackgroundRefresh() }
             default:

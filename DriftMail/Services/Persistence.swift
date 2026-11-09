@@ -3,7 +3,7 @@ import Foundation
 /// Saves accounts, mailbox lists and message summaries as JSON files so the
 /// app opens instantly with the last known state.
 enum Persistence {
-    struct Snapshot: Codable {
+    struct Snapshot: Codable, Sendable {
         var accounts: [MailAccount] = []
         var mailboxes: [String: [Mailbox]] = [:]           // accountID -> mailboxes
         var messages: [String: [MessageSummary]] = [:]     // mailboxKey -> messages

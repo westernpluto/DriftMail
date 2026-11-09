@@ -64,7 +64,7 @@ final class MailStore {
     /// Bump when the way summaries (subject, sender, preview) are decoded changes, so
     /// messages saved by an older version are downloaded again instead of keeping
     /// e.g. "?" for emoji or CSS in the preview.
-    private static let cacheVersion = 3  // 3: base64 padding fix (subjects ending in "?")
+    private static let cacheVersion = 4  // 4: message sizes, and small messages cached for instant opening
 
     init() {
         let snapshot = Persistence.load()
@@ -92,7 +92,28 @@ final class MailStore {
 
     // MARK: Persistence
 
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+
+    /// Saves shortly after the last change, encoding and writing off the main thread,
+    /// so frequent small changes (marking read, refreshes) never stall the interface.
     func save() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard let self, !Task.isCancelled else { return }
+            let snapshot = self.makeSnapshot()
+            await Task.detached(priority: .utility) { Persistence.save(snapshot) }.value
+        }
+    }
+
+    /// Saves immediately (when the app is about to be suspended).
+    func saveNow() {
+        saveTask?.cancel()
+        saveTask = nil
+        Persistence.save(makeSnapshot())
+    }
+
+    private func makeSnapshot() -> Persistence.Snapshot {
         var snapshot = Persistence.Snapshot()
         snapshot.accounts = accounts
         snapshot.mailboxes = Dictionary(uniqueKeysWithValues: mailboxes.map { ($0.key.uuidString, $0.value) })
@@ -101,7 +122,7 @@ final class MailStore {
         snapshot.highestSeenUID = highestSeenUID
         snapshot.unreadCounts = unreadCounts
         snapshot.cacheVersion = Self.cacheVersion
-        Persistence.save(snapshot)
+        return snapshot
     }
 
     // MARK: Lookups
@@ -377,8 +398,10 @@ final class MailStore {
     /// behind at most one prefetch. Already-downloaded ones are skipped.
     private func prefetchBodies(in box: Mailbox, count: Int = 12) {
         guard !prefetching.contains(box.id), let account = account(box.accountID) else { return }
+        // Skip very large messages (big attachments): a tapped message could otherwise wait
+        // for one to finish downloading. Unknown sizes come from older saved lists.
         let targets = (messagesByMailbox[box.id] ?? []).prefix(count)
-            .filter { !Persistence.hasCachedRawMessage($0.id) }
+            .filter { ($0.size ?? Int.max) <= Self.prefetchSizeLimit && !Persistence.hasCachedRawMessage($0.id) }
         guard !targets.isEmpty else { return }
         prefetching.insert(box.id)
         Task { [weak self] in
@@ -386,22 +409,38 @@ final class MailStore {
             for summary in targets {
                 guard let self, self.liveEnabled else { return }  // stop when the app leaves the screen
                 guard let raw = try? await self.bodySession(for: account)
-                    .rawMessage(mailbox: summary.mailboxPath, uid: summary.uid) else { continue }
+                    .rawMessage(mailbox: summary.mailboxPath, uid: summary.uid, priority: .low) else { continue }
                 Persistence.cacheRawMessage(raw, id: summary.id)
             }
         }
     }
 
+    private static let prefetchSizeLimit = 400 * 1024
+
     func body(for summary: MessageSummary) async throws -> MessageBody {
-        if let cached = bodyCache[summary.id] { return cached }
+        let started = Date()
+        var timing = OpenTiming(date: started, subject: summary.subject, source: .memory)
+        if let cached = bodyCache[summary.id] {
+            pendingOpenTiming = timing
+            return cached
+        }
         let raw: [UInt8]
-        if let cachedRaw = Persistence.cachedRawMessage(summary.id) {
+        let id = summary.id
+        // Disk reads stay off the main thread too.
+        if let cachedRaw = await Task.detached(priority: .userInitiated, operation: { Persistence.cachedRawMessage(id) }).value {
             raw = cachedRaw
+            timing.source = .disk
         } else {
             guard let account = account(summary.accountID) else { throw MailError.notFound }
-            raw = try await bodySession(for: account).rawMessage(mailbox: summary.mailboxPath, uid: summary.uid)
-            Persistence.cacheRawMessage(raw, id: summary.id)
+            let result = try await bodySession(for: account).rawMessageTimed(mailbox: summary.mailboxPath, uid: summary.uid)
+            raw = result.bytes
+            timing.source = .network
+            timing.network = result.timing
+            let bytes = raw
+            Task.detached(priority: .utility) { Persistence.cacheRawMessage(bytes, id: id) }
         }
+        timing.bytes = raw.count
+        let parseStarted = Date()
         // Parsing and preview text stay off the main thread: a very large HTML email
         // could otherwise freeze the app long enough for iOS to stop it.
         let (body, preview, subject, from) = await Task.detached(priority: .userInitiated) {
@@ -414,6 +453,9 @@ final class MailStore {
             return (body, MIME.previewText(from: body), subject, MIME.parseAddresses(root.header("from")).first)
         }.value
         bodyCache[summary.id] = body
+        timing.parse = Date().timeIntervalSince(parseStarted)
+        timing.ready = Date().timeIntervalSince(started)
+        pendingOpenTiming = timing
         // The list row came from the start of the message only (and may have been saved
         // by an older version); the full message gives the real subject, sender and preview.
         let newPreview = preview.isEmpty ? summary.preview : preview
@@ -557,6 +599,30 @@ final class MailStore {
     /// Drops the command connections when the app leaves the foreground: iOS and
     /// mail servers often cut them silently while the app is suspended, and a
     /// dead connection would stall the next message opened. New ones are made on demand.
+    /// Reconnects the message-opening connections in the background when the app comes
+    /// back, so the first message tapped doesn't wait for signing in.
+    func warmConnections() {
+        for account in accounts {
+            let session = bodySession(for: account)
+            Task { await session.warm() }
+        }
+    }
+
+    // MARK: Open-speed diagnostics
+
+    /// The last few times a message was opened, newest first (Settings → Diagnostics).
+    var openTimings: [OpenTiming] = []
+    /// Filled in by `body(for:)`; completed when the message is on screen.
+    @ObservationIgnored private var pendingOpenTiming: OpenTiming?
+
+    /// Called by the message view once the email is visible.
+    func recordDisplayed(after seconds: TimeInterval) {
+        guard var timing = pendingOpenTiming else { return }
+        pendingOpenTiming = nil
+        timing.displayed = seconds
+        openTimings = [timing] + openTimings.prefix(9)
+    }
+
     func closeConnections() {
         let open = Array(sessions.values) + Array(bodySessions.values)
         sessions.removeAll()
@@ -624,6 +690,7 @@ final class MailStore {
         for account in accounts {
             fresh += await refreshMailbox(inbox(for: account.id))
         }
+        saveNow()  // iOS may suspend the app as soon as this returns
         // With the relay set up it already announced these: posting them again here
         // gave duplicate notifications whenever iOS ran a background refresh.
         guard !PushRelay.shared.isConfigured else { return }
@@ -958,5 +1025,42 @@ extension MailStore {
         // The server is the source of truth for what's left and the unread count.
         await refreshMailbox(box)
         save()
+    }
+}
+
+/// How long one message took to open, step by step.
+struct OpenTiming: Identifiable, Sendable {
+    enum Source: String, Sendable {
+        case memory = "already open"
+        case disk = "saved on phone"
+        case network = "downloaded"
+    }
+
+    var id = UUID()
+    var date: Date
+    var subject: String
+    var source: Source
+    var network: AccountSession.NetworkTiming?
+    var bytes: Int = 0
+    var parse: TimeInterval = 0
+    var ready: TimeInterval = 0       // tap until the message's content was ready
+    var displayed: TimeInterval = 0   // tap until it was on screen
+
+    /// "Downloaded 240 KB · waited 0.0 s · connection 1.8 s · download 0.6 s · prepare 0.1 s"
+    var breakdown: String {
+        var parts = [source.rawValue.capitalized]
+        if bytes > 0 { parts[0] += " " + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
+        if let network {
+            parts.append("waited \(Self.seconds(network.wait))")
+            parts.append("connection \(Self.seconds(network.connect))")
+            parts.append("download \(Self.seconds(network.fetch))")
+        }
+        if parse > 0 { parts.append("prepare \(Self.seconds(parse))") }
+        if displayed > ready { parts.append("display \(Self.seconds(displayed - ready))") }
+        return parts.joined(separator: " · ")
+    }
+
+    static func seconds(_ value: TimeInterval) -> String {
+        String(format: "%.1f s", value)
     }
 }

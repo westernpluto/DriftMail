@@ -11,22 +11,39 @@ actor AccountSession {
     // a message) would talk over each other on one socket, and one would swallow
     // the other's reply and hang until the timeout.
     private var busy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(priority: Priority, continuation: CheckedContinuation<Void, Never>)] = []
 
-    private func acquire() async {
+    /// Who gets the connection next when several operations are waiting. Opening a
+    /// message you tapped goes ahead of list refreshes, which go ahead of prefetching.
+    enum Priority: Int, Comparable, Sendable {
+        case low, normal, high
+        static func < (a: Priority, b: Priority) -> Bool { a.rawValue < b.rawValue }
+    }
+
+    /// How long the last operation waited for its turn, and how long it then spent
+    /// checking or re-establishing the connection (for the open-speed diagnostics).
+    private(set) var lastWait: TimeInterval = 0
+    private(set) var lastConnect: TimeInterval = 0
+
+    private func acquire(_ priority: Priority) async {
+        let started = Date()
         if busy {
-            await withCheckedContinuation { waiters.append($0) }
+            await withCheckedContinuation { waiters.append((priority, $0)) }
         } else {
             busy = true
         }
+        lastWait = Date().timeIntervalSince(started)
     }
 
     private func release() {
-        if waiters.isEmpty {
+        guard !waiters.isEmpty else {
             busy = false
-        } else {
-            waiters.removeFirst().resume()  // hand the turn straight to the next one
+            return
         }
+        // Highest priority first; among equals, whoever asked first.
+        let best = waiters.indices.max { waiters[$0].priority < waiters[$1].priority || 
+            (waiters[$0].priority == waiters[$1].priority && $0 > $1) }!
+        waiters.remove(at: best).continuation.resume()  // hand the turn straight over
     }
 
     init(account: MailAccount) {
@@ -41,13 +58,15 @@ actor AccountSession {
     }
 
     private func connected() async throws -> IMAPClient {
+        let started = Date()
+        defer { lastConnect = Date().timeIntervalSince(started) }
         if let client {
             // A connection left unused (app in the background, phone asleep) is often
             // dropped without notice. Check it quickly rather than letting the next
             // command hang for the full timeout while everything queues behind it.
             if Date().timeIntervalSince(lastUsed) > 30 {
                 do {
-                    try await client.noop(timeout: 8)
+                    try await client.noop(timeout: 4)
                     lastUsed = Date()
                     return client
                 } catch {
@@ -67,8 +86,8 @@ actor AccountSession {
         return fresh
     }
 
-    private func perform<T>(_ operation: (IMAPClient) async throws -> T) async throws -> T {
-        await acquire()
+    private func perform<T>(priority: Priority = .normal, _ operation: (IMAPClient) async throws -> T) async throws -> T {
+        await acquire(priority)
         defer {
             if client != nil { lastUsed = Date() }
             release()
@@ -136,19 +155,56 @@ actor AccountSession {
             for chunk in stride(from: 0, to: missing.count, by: 20).map({ Array(missing[$0..<min($0 + 20, missing.count)]) }) {
                 let previews = try await client.fetchPreviews(uids: chunk, previewBytes: Self.previewBytes)
                 for item in previews {
-                    summaries.append(MIME.summary(from: item.body ?? [], accountID: accountID, mailbox: mailbox,
-                                                  uid: item.uid, flags: item.flags, internalDate: item.internalDate))
+                    summaries.append(Self.summary(from: item, accountID: accountID, mailbox: mailbox))
                 }
             }
             return PageResult(flags: flags, newSummaries: summaries, totalCount: total)
         }
     }
 
-    func rawMessage(mailbox: String, uid: UInt32) async throws -> [UInt8] {
-        try await perform { client in
+    func rawMessage(mailbox: String, uid: UInt32, priority: Priority = .high) async throws -> [UInt8] {
+        try await perform(priority: priority) { client in
             _ = try await self.ensureSelected(client, mailbox)
             return try await client.fetchFullMessage(uid: uid)
         }
+    }
+
+    struct NetworkTiming: Sendable {
+        var wait: TimeInterval      // queued behind another operation on this connection
+        var connect: TimeInterval   // checking a reused connection, or connecting + signing in
+        var fetch: TimeInterval     // selecting the mailbox and downloading the message
+    }
+
+    /// Opens a message, with timings for the open-speed diagnostics.
+    func rawMessageTimed(mailbox: String, uid: UInt32) async throws -> (bytes: [UInt8], timing: NetworkTiming) {
+        try await perform(priority: .high) { client in
+            let wait = self.lastWait
+            let connect = self.lastConnect
+            let started = Date()
+            _ = try await self.ensureSelected(client, mailbox)
+            let bytes = try await client.fetchFullMessage(uid: uid)
+            return (bytes, NetworkTiming(wait: wait, connect: connect, fetch: Date().timeIntervalSince(started)))
+        }
+    }
+
+    /// Makes sure the connection is up (reconnecting if it died), so the next message
+    /// opened doesn't pay for that. Used when the app comes to the foreground.
+    func warm() async {
+        _ = try? await perform(priority: .low) { _ in }
+    }
+
+    /// Builds a summary from a preview fetch. When that fetch already holds the whole
+    /// message (most emails are smaller than the preview size), it's cached, so the
+    /// message opens instantly without downloading it again.
+    private static func summary(from item: IMAPFetchResult, accountID: UUID, mailbox: String) -> MessageSummary {
+        var summary = MIME.summary(from: item.body ?? [], accountID: accountID, mailbox: mailbox,
+                                   uid: item.uid, flags: item.flags, internalDate: item.internalDate)
+        summary.size = item.size
+        if let size = item.size, size > 0, let body = item.body, body.count >= size,
+           !Persistence.hasCachedRawMessage(summary.id) {
+            Persistence.cacheRawMessage(body, id: summary.id)
+        }
+        return summary
     }
 
     /// How much of each message the list downloads for its preview. Newsletters often
@@ -227,8 +283,7 @@ actor AccountSession {
             for start in stride(from: 0, to: uids.count, by: 20) {
                 let chunk = Array(uids[start..<min(start + 20, uids.count)])
                 for item in try await client.fetchPreviews(uids: chunk, previewBytes: Self.previewBytes) {
-                    summaries.append(MIME.summary(from: item.body ?? [], accountID: accountID, mailbox: mailbox,
-                                                  uid: item.uid, flags: item.flags, internalDate: item.internalDate))
+                    summaries.append(Self.summary(from: item, accountID: accountID, mailbox: mailbox))
                 }
             }
             return summaries

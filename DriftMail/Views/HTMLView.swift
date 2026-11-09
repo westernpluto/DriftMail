@@ -22,6 +22,8 @@ struct HTMLView: UIViewRepresentable {
     var onMailto: (String) -> Void = { _ in }
     /// Called with a reason if the email can't be displayed (so the text version can be shown).
     var onFailure: (String) -> Void = { _ in }
+    /// Called once, when the email has laid out and is visible.
+    var onRendered: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(onMailto: onMailto, onFailure: onFailure) }
 
@@ -68,13 +70,26 @@ struct HTMLView: UIViewRepresentable {
     func updateUIView(_ webView: HeaderedWebView, context: Context) {
         context.coordinator.onMailto = onMailto
         context.coordinator.onFailure = onFailure
+        context.coordinator.onRendered = onRendered
         let appStyle = Self.style(for: context.environment.colorScheme)
         webView.setAccessories(header: header, footer: footer, style: appStyle)
         // Overscroll above and below the email shows the app's background.
         webView.underPageBackgroundColor = appStyle == .dark ? .black : .white
         guard context.coordinator.loadedHTML != html else { return }
         context.coordinator.loadedHTML = html
-        context.coordinator.start(webView, page: Self.wrap(html))
+        // Preparing the page runs regular expressions over the whole email, which can be
+        // megabytes with embedded images: do it off the main thread.
+        let coordinator = context.coordinator
+        coordinator.generation += 1
+        let generation = coordinator.generation
+        let raw = html
+        Task.detached(priority: .userInitiated) {
+            let page = HTMLView.wrap(raw)
+            await MainActor.run {
+                guard coordinator.generation == generation else { return }  // a newer email replaced it
+                coordinator.start(webView, page: page)
+            }
+        }
     }
 
     static func dismantleUIView(_ webView: HeaderedWebView, coordinator: Coordinator) {
@@ -95,7 +110,7 @@ struct HTMLView: UIViewRepresentable {
     @MainActor private static var warmWebView: WKWebView?
 
     /// True if the email loads anything from the network (images, backgrounds).
-    static func hasRemoteContent(_ html: String) -> Bool {
+    nonisolated static func hasRemoteContent(_ html: String) -> Bool {
         html.range(of: #"(src|background)\s*=\s*["']?\s*https?:|url\(\s*["']?\s*https?:"#,
                    options: [.regularExpression, .caseInsensitive]) != nil
     }
@@ -103,7 +118,7 @@ struct HTMLView: UIViewRepresentable {
     /// Remote web fonts and external stylesheets are dropped, as Gmail and Outlook do: on
     /// iOS, text waiting for a web font stays invisible, and these requests also tell
     /// senders that the email was opened.
-    private static func stripRemoteStyles(_ html: String) -> String {
+    nonisolated private static func stripRemoteStyles(_ html: String) -> String {
         var text = html
         text = text.replacingOccurrences(of: #"@font-face\s*\{[^}]*\}"#, with: "",
                                          options: [.regularExpression, .caseInsensitive])
@@ -114,7 +129,7 @@ struct HTMLView: UIViewRepresentable {
         return text
     }
 
-    private static func wrap(_ rawHTML: String) -> String {
+    nonisolated static func wrap(_ rawHTML: String) -> String {
         let html = stripRemoteStyles(rawHTML)
         // Newsletters (table layouts) go edge to edge, as in Apple Mail; simple text
         // emails get normal reading margins.
@@ -209,8 +224,11 @@ struct HTMLView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var loadedHTML: String?
+        var generation = 0
         var onMailto: (String) -> Void
         var onFailure: (String) -> Void
+        var onRendered: () -> Void = {}
+        private var reportedRender = false
         private var page = ""
         private var reloads = 0
         private var measured = false
@@ -257,6 +275,10 @@ struct HTMLView: UIViewRepresentable {
             guard message.body is Double || message.body is Int else { return }
             measured = true
             watchdog?.cancel()
+            if !reportedRender {
+                reportedRender = true
+                onRendered()
+            }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

@@ -130,6 +130,8 @@ struct MessageSummary: Identifiable, Codable, Hashable, Sendable {
     var hasAttachments: Bool
     var messageID: String?
     var references: String?
+    /// The whole message's size in bytes, when known (used to skip prefetching huge ones).
+    var size: Int? = nil
 
     var id: String { "\(accountID.uuidString)|\(mailboxPath)|\(uid)" }
     var mailboxKey: String { "\(accountID.uuidString)|\(mailboxPath)" }

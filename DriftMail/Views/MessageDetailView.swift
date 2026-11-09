@@ -21,11 +21,15 @@ struct MessageDetailView: View {
     /// Remote images were allowed for this message (Load Images) while blocking is on.
     @State private var allowRemoteContent = false
     @AppStorage(RemoteContent.blockKey) private var blockRemoteImages = false
+    /// Whether the email loads anything from the network; worked out once, off the main thread.
+    @State private var hasRemoteContent = false
+    /// When this message was opened, for the open-speed diagnostics.
+    @State private var openedAt = Date()
 
     var body: some View {
         Group {
             if let html = body_?.html, !showPlainText {
-                let blocking = blockRemoteImages && !allowRemoteContent && HTMLView.hasRemoteContent(html)
+                let blocking = blockRemoteImages && !allowRemoteContent && hasRemoteContent
                 // HTML email: a screen-sized web view that scrolls the email itself, with the
                 // header and attachments scrolling inside it (as in Apple Mail).
                 HTMLView(html: html,
@@ -36,7 +40,8 @@ struct MessageDetailView: View {
                          onFailure: { reason in
                              renderFailure = reason
                              showPlainText = true
-                         })
+                         },
+                         onRendered: { store.recordDisplayed(after: Date().timeIntervalSince(openedAt)) })
                 .id(blocking)  // rebuilt without the block after Load Images
                 // Bars above and below may show and hide while scrolling; the email view keeps
                 // its size (its scroll view insets adjust instead), so nothing reflows or jumps.
@@ -421,11 +426,22 @@ struct MessageDetailView: View {
 
     private func load() async {
         loadError = nil
+        openedAt = Date()
         do {
             let loaded = try await store.body(for: summary)
             // Blocking rules must exist before the email renders, or images could slip through.
-            if blockRemoteImages { await RemoteContent.prepare() }
+            if blockRemoteImages {
+                await RemoteContent.prepare()
+                let html = loaded.html
+                hasRemoteContent = await Task.detached(priority: .userInitiated) {
+                    html.map(HTMLView.hasRemoteContent) ?? false
+                }.value
+            }
             withAnimation(.easeOut(duration: 0.2)) { body_ = loaded }
+            if loaded.html == nil || showPlainText {
+                // Text emails are on screen as soon as they're set.
+                store.recordDisplayed(after: Date().timeIntervalSince(openedAt))
+            }
             shareText = await Task.detached(priority: .utility) {
                 loaded.plainText ?? loaded.html.map(MIME.htmlToText)
             }.value

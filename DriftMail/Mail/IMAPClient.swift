@@ -12,6 +12,8 @@ struct IMAPFetchResult: Sendable {
     var flags: [String]
     var internalDate: Date?
     var body: [UInt8]?
+    /// The whole message's size in bytes (RFC822.SIZE), when requested.
+    var size: Int? = nil
 }
 
 /// A small IMAP4rev1 client covering what a mail app needs.
@@ -128,7 +130,7 @@ final class IMAPClient: @unchecked Sendable {
     /// Fetches flags, date and the first bytes of each message (enough for headers and a preview).
     func fetchPreviews(uids: [UInt32], previewBytes: Int = 16384) async throws -> [IMAPFetchResult] {
         guard !uids.isEmpty else { return [] }
-        return try await fetch("UID FETCH \(IMAPClient.uidSet(uids)) (UID FLAGS INTERNALDATE BODY.PEEK[]<0.\(previewBytes)>)")
+        return try await fetch("UID FETCH \(IMAPClient.uidSet(uids)) (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.\(previewBytes)>)")
     }
 
     func fetchFullMessage(uid: UInt32) async throws -> [UInt8] {
@@ -152,6 +154,7 @@ final class IMAPClient: @unchecked Sendable {
                 case "UID": result.uid = UInt32(value.text ?? "") ?? 0
                 case "FLAGS": result.flags = (value.list ?? []).compactMap { $0.text }
                 case "INTERNALDATE": result.internalDate = value.text.flatMap(IMAPClient.parseInternalDate)
+                case "RFC822.SIZE": result.size = value.int
                 default:
                     if key.hasPrefix("BODY[") || key.hasPrefix("RFC822") { result.body = value.bytes }
                 }
@@ -165,6 +168,7 @@ final class IMAPClient: @unchecked Sendable {
                 if result.body != nil { results[index].body = result.body }
                 if !result.flags.isEmpty { results[index].flags = result.flags }
                 if result.internalDate != nil { results[index].internalDate = result.internalDate }
+                if result.size != nil { results[index].size = result.size }
             } else {
                 indexByUID[result.uid] = results.count
                 results.append(result)
